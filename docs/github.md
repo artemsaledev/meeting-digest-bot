@@ -27,7 +27,7 @@ gh auth login
 Create a private repo and push:
 
 ```powershell
-cd "C:\Users\artem\Downloads\dev-scripts\6. Task Manager"
+cd "meeting-digest-bot"
 gh repo create meeting-digest-bot --private --source . --remote origin --push
 ```
 

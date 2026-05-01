@@ -59,7 +59,7 @@ More details: [Bitrix Publication Rules](docs/bitrix-publication.md).
 ## Local Development
 
 ```powershell
-cd "C:\Users\artem\Downloads\dev-scripts\6. Task Manager"
+cd "meeting-digest-bot"
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 copy .env.example .env

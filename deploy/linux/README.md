@@ -16,14 +16,14 @@ The service can stay private on `127.0.0.1`; Telegram commands are handled throu
 From the local project:
 
 ```powershell
-cd "C:\Users\artem\Downloads\dev-scripts\6. Task Manager"
+cd "meeting-digest-bot"
 powershell -ExecutionPolicy Bypass -File .\deploy\windows\package_for_vps.ps1
 ```
 
 The archive is created at:
 
 ```text
-C:\Users\artem\Downloads\dev-scripts\6. Task Manager\data\runtime\meeting-digest-bot-release.zip
+meeting-digest-bot\data\runtime\meeting-digest-bot-release.zip
 ```
 
 The archive intentionally excludes `.env`, SQLite state DB files, caches, and local runtime data.

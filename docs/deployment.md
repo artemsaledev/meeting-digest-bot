@@ -19,7 +19,7 @@ Recommended paths:
 On Windows:
 
 ```powershell
-cd "C:\Users\artem\Downloads\dev-scripts\6. Task Manager"
+cd "meeting-digest-bot"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy\windows\package_for_vps.ps1
 ```
 
