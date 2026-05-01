@@ -1,0 +1,729 @@
+# MeetingDigestBot
+
+## Назначение
+
+`MeetingDigestBot` — отдельный сервис вокруг `AIcallorder`, который берет уже обработанные Loom-встречи, их digest-публикации в Telegram и создает или обновляет задачи в CRM Totis/Bitrix в проекте `Bitrix Develop Team` (`GROUP_ID = 512`).
+
+Сервис не заменяет существующий support-бот в CRM и не встраивается в него. Это отдельный контур, который использует:
+
+- артефакты встреч из `AIcallorder`
+- ссылки на посты в Telegram-канале
+- webhook Totis/Bitrix для работы с задачами
+
+---
+
+## Базовый принцип
+
+Telegram-пост не является источником правды сам по себе. Источником правды является `AIcallorder`, который уже знает:
+
+- `loom_video_id`
+- transcript
+- cleaned transcript
+- summary
+- technical spec draft
+- action items
+- Google Doc / Transcript Doc ссылки
+- `message_id` поста в Telegram после публикации
+
+Поэтому новый сервис работает так:
+
+1. `AIcallorder` публикует meeting digest в Telegram.
+2. После публикации `AIcallorder` регистрирует публикацию в `MeetingDigestBot`.
+3. Пользователь отправляет боту ссылку на пост.
+4. Бот находит публикацию по `post_url` или `message_id`.
+5. Бот определяет сценарий:
+   - создать новую задачу
+   - обновить существующую
+   - добавить комментарий
+   - добавить чеклисты
+   - обновить weekly-задачу
+6. Сервис пишет результат в Totis/Bitrix и сохраняет привязку `source -> task_id`.
+
+---
+
+## Границы системы
+
+### Что делает сервис
+
+- принимает регистрацию публикаций из `AIcallorder`
+- хранит связку `Telegram post -> meeting artifacts`
+- принимает ссылку на пост и команду действия
+- строит draft задачи на основе артефактов встречи
+- создает или обновляет задачи в `GROUP_ID = 512`
+- добавляет чеклисты QA и PM
+- агрегирует weekly-задачу с обязательствами недели
+
+### Что сервис не делает в первом этапе
+
+- не расшифровывает видео сам
+- не читает историю канала Telegram как единственный источник данных
+- не заменяет текущий support-бот CRM
+- не строит сложный Telegram UI с длинным диалогом
+- не пытается полностью автоматически матчить задачи без подтверждения
+
+---
+
+## Проект CRM
+
+Все задачи создаются или обновляются в проекте:
+
+- `Bitrix Develop Team`
+- `GROUP_ID = 512`
+- URL проекта: [Bitrix Develop Team](https://totiscrm.com/workgroups/group/512/tasks/)
+
+---
+
+## Источники данных
+
+### Основной источник
+
+SQLite `AIcallorder`:
+
+- путь по умолчанию: `C:\Users\artem\Downloads\dev-scripts\4. Loom\data\loom_automation.db`
+- таблица `meetings`
+- поля:
+  - `loom_video_id`
+  - `source_url`
+  - `title`
+  - `meeting_type`
+  - `recorded_at`
+  - `transcript_text`
+  - `artifacts_json`
+
+### Вторичный источник
+
+Локальная SQLite БД `MeetingDigestBot`, в которой сохраняются:
+
+- публикации Telegram
+- привязки CRM-задач
+- weekly rollups
+
+---
+
+## Сущности БД
+
+### 1. publications
+
+Хранит связь между постом в Telegram и артефактами встречи / дайджеста.
+
+Поля:
+
+- `id`
+- `post_url`
+- `telegram_chat_id`
+- `telegram_message_id`
+- `digest_type` (`meeting`, `daily`, `weekly`)
+- `loom_video_id`
+- `report_date`
+- `week_from`
+- `week_to`
+- `meeting_title`
+- `source_url`
+- `google_doc_url`
+- `transcript_doc_url`
+- `payload_json`
+- `created_at`
+
+### 2. crm_task_bindings
+
+Хранит связь между сущностью digest-системы и задачей CRM.
+
+Поля:
+
+- `id`
+- `source_type` (`meeting`, `daily_digest`, `weekly_digest`)
+- `source_key`
+- `bitrix_task_id`
+- `external_task_number`
+- `mode` (`created`, `updated`, `commented`, `checklisted`)
+- `title`
+- `meta_json`
+- `created_at`
+- `updated_at`
+
+Уникальность:
+
+- одна активная привязка на `source_type + source_key`
+
+### 3. weekly_rollups
+
+Поля:
+
+- `week_from`
+- `week_to`
+- `summary_json`
+- `source_meeting_ids_json`
+- `bitrix_task_id`
+- `updated_at`
+
+---
+
+## Входные сценарии
+
+### Сценарий 1. Создать новую задачу из поста
+
+Вход:
+
+- ссылка на пост в канале
+- команда `create` или `new`
+
+Результат:
+
+- новая задача в CRM
+- `TITLE`
+- `DESCRIPTION`
+- чеклист `QA`
+- чеклист `Критерии приемки PM`
+- комментарий с источниками
+
+### Сценарий 2. Обновить существующую задачу
+
+Вход:
+
+- ссылка на пост
+- `task_id` или URL задачи
+- действие:
+  - `update_description`
+  - `append_comment`
+  - `append_checklists`
+
+Результат:
+
+- обновление существующей задачи без потери истории
+
+### Сценарий 3. Weekly task
+
+Вход:
+
+- диапазон недели
+- либо ссылка на weekly digest
+- либо `task_id` weekly-задачи
+
+Результат:
+
+- создается или обновляется задача вида `Неделя dd.mm-dd.mm`
+- добавляется чеклист `Обязательства недели`
+
+### Сценарий 4. Daily digest
+
+Вход:
+
+- ссылка на daily digest
+- либо дата дня
+- либо `task_id` существующей задачи
+
+Результат:
+
+- создается отдельная daily-задача
+- либо daily summary добавляется в существующую weekly-задачу комментарием или чеклистами
+- в описание пишется weekly summary
+
+---
+
+## Формат задач
+
+### Meeting task
+
+#### TITLE
+
+Берется по приоритету:
+
+1. `technical_spec_draft.title`
+2. нормализованное название встречи
+
+#### DESCRIPTION
+
+Секции:
+
+- Краткое резюме
+- Контекст
+- Принятые решения
+- Что нужно реализовать
+- Зависимости
+- Открытые вопросы
+- Источники
+
+#### Checklist: QA
+
+На первом этапе строится из:
+
+- `technical_spec_draft.acceptance_criteria`
+- при необходимости из `action_items`
+
+#### Checklist: PM
+
+На первом этапе строится из:
+
+- `technical_spec_draft.acceptance_criteria`
+
+### Weekly task
+
+#### TITLE
+
+- `Неделя {week_from} - {week_to}`
+
+#### DESCRIPTION
+
+Секции:
+
+- Summary недели
+- Основные решения
+- Блокеры
+- Что осталось
+- Источники встреч
+
+#### Checklist: Обязательства недели
+
+Каждый пункт — нормализованное обязательство за неделю.
+
+---
+
+## Команды бота
+
+Минимальный набор команд для первого этапа:
+
+- `/start`
+- `/help`
+- сообщение с `post_url`
+- сообщение с `post_url + new`
+- сообщение с `post_url + task 166229`
+- сообщение с `post_url + comment 166229`
+- сообщение с `post_url + checklist 166229`
+- `/week 2026-04-27 2026-05-03`
+- `/week 2026-04-27 2026-05-03 task 166229`
+
+### Local polling mode
+
+For local development without a public webhook:
+
+```bash
+python -m meeting_digest_bot poll-telegram --drop-pending
+```
+
+Useful one-shot check:
+
+```bash
+python -m meeting_digest_bot poll-telegram --once --timeout 1 --limit 5
+```
+
+Supported user messages:
+
+- `https://t.me/c/5147878786/120`
+- `https://t.me/c/5147878786/120 preview`
+- `https://t.me/c/5147878786/120 создать`
+- `https://t.me/c/5147878786/120 коммент 168334`
+- `https://t.me/c/5147878786/120 чеклист 168334`
+- `https://t.me/c/5147878786/120 обновить 168334`
+- `/day 2026-04-14`
+- `/day 2026-04-14 week 168336`
+- `/week 2026-04-27 2026-05-03`
+
+---
+
+## Интеграция с Totis/Bitrix
+
+### Основные методы
+
+- `tasks.task.list`
+- `tasks.task.get`
+- `tasks.task.add`
+- `tasks.task.update`
+- `task.checklistitem.add`
+- `tasks.task.chat.message.send`
+
+### Fallback legacy
+
+- `task.items.getlist`
+- `task.item.update`
+- `task.comment.add`
+
+### Комментарий
+
+Для новых задач и текущей карточки задачи нужно ориентироваться на:
+
+- `tasks.task.chat.message.send`
+
+### Чеклисты
+
+Для чеклистов использовать:
+
+- `task.checklistitem.add`
+
+Отдельные группы чеклистов создаются как корневые пункты:
+
+- `QA`
+- `Критерии приемки PM`
+- `Обязательства недели`
+
+---
+
+## Требования к интеграции с AIcallorder
+
+После публикации поста `AIcallorder` должен вызвать один из вариантов:
+
+### Вариант A. HTTP register
+
+`POST /publications/register`
+
+Передаваемые поля:
+
+- `post_url`
+- `telegram_chat_id`
+- `telegram_message_id`
+- `digest_type`
+- `loom_video_id`
+- `meeting_title`
+- `source_url`
+- `google_doc_url`
+- `transcript_doc_url`
+- `payload`
+
+### Вариант B. CLI register
+
+Вызов локальной команды регистрации публикации после `send_digest`.
+
+---
+
+## MVP roadmap
+
+### MVP v1
+
+Цель:
+
+- создать новый сервис
+- уметь регистрировать Telegram-публикации
+- уметь по ссылке на пост создать задачу или обновить существующую
+
+Состав:
+
+- state DB
+- AIcallorder reader
+- Bitrix client
+- Task draft builder
+- HTTP API
+- Telegram webhook handler
+
+### MVP v2
+
+Цель:
+
+- daily rollup
+- weekly rollup
+- задача недели
+- чеклист обязательств недели
+
+Состав:
+
+- daily aggregator
+- weekly aggregator
+- weekly task rendering
+- weekly bindings
+
+### MVP v3
+
+Цель:
+
+- semi-auto matching существующих задач
+- режимы update / comment / checklist
+- дедупликация по источникам
+
+Состав:
+
+- resolver источников
+- preview логики
+- защита от повторной публикации одних и тех же чеклистов
+
+### MVP v4
+
+Цель:
+
+- обогащение артефактов через отдельный weekly prompt
+- более точное извлечение обязательств недели
+- кластеризация нескольких запросов из одной встречи
+
+---
+
+## Структура проекта
+
+```text
+meeting_digest_bot/
+  __init__.py
+  __main__.py
+  app.py
+  cli.py
+  config.py
+  models.py
+  telegram_links.py
+  telegram_bot.py
+  aicallorder_db.py
+  state_db.py
+  task_drafts.py
+  bitrix_client.py
+  service.py
+```
+
+---
+
+## Что уже реализуем в текущем этапе
+
+1. Каркас отдельного Python-сервиса
+2. Локальная SQLite для публикаций и bindings
+3. Чтение `meetings` из `AIcallorder`
+4. Регистрация публикаций
+5. Создание task draft из meeting artifacts
+6. Создание / обновление задачи в `GROUP_ID = 512`
+7. Добавление QA / PM чеклистов
+8. Минимальный weekly rollup
+
+---
+
+## Что нужно учитывать в следующем чате
+
+Если диалог переполнится, продолжать с этой точки:
+
+- сервис отдельный от текущего CRM support-бота
+- источник правды по встречам — `AIcallorder`
+- по ссылке на пост работаем через зарегистрированную публикацию
+- проект задач всегда `GROUP_ID = 512`
+- first-class сценарии: `create`, `update_description`, `append_comment`, `append_checklists`, `weekly_sync`
+
+---
+
+## Статус
+
+Этот документ является исходной точкой для продолжения реализации в новом чате.
+
+---
+
+## Live Test Status (2026-04-30)
+
+Verified end-to-end on real Telegram publications and real Totis webhook:
+
+- Meeting publication `https://t.me/c/5147878786/117`
+  - source: Loom meeting `dfddf2ec637147bfa4d82a2d655b2ae1`
+  - CRM task: `168333`
+  - mode: existing task flow tested through comment append
+
+- Meeting publication `https://t.me/c/5147878786/118`
+  - source: Loom meeting `42b43e4688d84ce68020248ed4d7777f`
+  - CRM task created: `168334`
+  - result: create flow works with QA + PM checklists
+
+- Meeting publication `https://t.me/c/5147878786/120`
+  - source: Loom meeting `42b43e4688d84ce68020248ed4d7777f`
+  - publication was sent by `AIcallorder`
+  - publication was auto-registered in `MeetingDigestBot`
+  - sync by post link reused existing binding and appended comment to task `168334`
+
+- Daily publication `https://t.me/c/5147878786/119`
+  - source date: `2026-04-14`
+  - publication was sent by `AIcallorder`
+  - publication was auto-registered in `MeetingDigestBot`
+  - CRM task created from post link: `168335`
+
+- Weekly sync `2026-04-13` - `2026-04-19`
+  - CRM task: `168336`
+  - binding saved as `weekly_digest / 2026-04-13:2026-04-19`
+  - weekly rollup saved in local state DB
+
+### AIcallorder integration status
+
+Implemented in adjacent project `C:\Users\artem\Downloads\dev-scripts\4. Loom`:
+
+- `loom_automation/integrations/meeting_digest_bot.py`
+- `TelegramNotifier.send_digest()` now returns `chat_id`
+- meeting publication registration after Telegram send
+- daily publication registration after Telegram send
+- new env keys:
+  - `MEETING_DIGEST_BOT_BASE_URL`
+  - `MEETING_DIGEST_BOT_TIMEOUT_SECONDS`
+  - `TELEGRAM_CHANNEL_USERNAME`
+
+### Local run notes
+
+- `MeetingDigestBot` local service tested on `http://127.0.0.1:8011`
+- state DB:
+  - `C:\Users\artem\Downloads\dev-scripts\6. Task Manager\data\meeting_digest_bot.db`
+- AIcallorder DB:
+  - `C:\Users\artem\Downloads\dev-scripts\4. Loom\data\loom_automation.db`
+
+### Next recommended steps
+
+1. Bind a real Telegram bot webhook/user flow for post links instead of manual CLI sync.
+2. Add weekly digest auto-registration from AIcallorder when weekly publishing appears.
+3. Improve preview/update logic for matching existing tasks before writing to CRM.
+
+### Update after continuation
+
+- Added local Telegram polling worker:
+  - `meeting_digest_bot/telegram_poller.py`
+  - CLI command: `python -m meeting_digest_bot poll-telegram --drop-pending`
+- Added Russian action aliases:
+  - `preview`
+  - `предпросмотр`
+  - `показать`
+  - `создать`
+  - `коммент`
+  - `чеклист`
+  - `обновить`
+- Fixed private Telegram post parsing for links like `https://t.me/c/5147878786/120`.
+- Fixed weekly rollup JSON serialization for date fields.
+- Added preview mode:
+  - Telegram messages without an explicit action now return a preview instead of writing to CRM.
+  - Preview shows the auto action, target task, checklist counts, and dedupe estimate.
+- Added checklist dedupe:
+  - existing checklist groups are reused by title.
+  - existing checklist items are skipped by normalized text.
+- Added task matching in preview:
+  - preview lists similar tasks from `GROUP_ID = 512`.
+  - matching uses local title similarity over recent Bitrix tasks.
+- Added daily -> weekly mode:
+  - `/day 2026-04-14 week 168336`
+  - CLI: `python -m meeting_digest_bot sync-day --report-date 2026-04-14 --action append_to_weekly --task-id 168336`
+- Added shared secret protection for `POST /publications/register`.
+- Added optional weekly LLM enhancer:
+  - enabled by `MEETING_DIGEST_WEEKLY_LLM_ENABLED=true`.
+  - falls back to deterministic aggregation if disabled or unavailable.
+- Added Linux deployment docs:
+  - `deploy/linux/README.md`
+  - `deploy/linux/systemd/meeting-digest-bot-api.service.example`
+  - `deploy/linux/systemd/meeting-digest-bot-poller.service.example`
+
+### VPS deployment package status (2026-05-01)
+
+- Added Ubuntu runtime installer:
+  - `deploy/linux/install_runtime_ubuntu.sh`
+- Added VPS verification helper:
+  - `deploy/linux/verify.sh`
+- Added AIcallorder env additions example:
+  - `deploy/linux/aicallorder.env.additions.example`
+- Added Windows release packager:
+  - `deploy/windows/package_for_vps.ps1`
+- Release archive output:
+  - `data/runtime/meeting-digest-bot-release.zip`
+- The archive excludes local secrets (`.env`), SQLite runtime DB files, caches, and local data.
+- Deployment is ready for transfer to VPS once SSH target/user is known.
+
+### VPS deployment completed (2026-05-01)
+
+- Published to VPS:
+  - `173.242.60.148`
+- MeetingDigestBot path:
+  - `/opt/meeting-digest-bot`
+- AIcallorder path:
+  - `/opt/AIcallorder`
+- AIcallorder DB path used by MeetingDigestBot:
+  - `/opt/AIcallorder/data/loom_automation.db`
+- Systemd services installed and active:
+  - `meeting-digest-bot-api.service`
+  - `meeting-digest-bot-poller.service`
+  - `aicallorder.service`
+- API health verified:
+  - `http://127.0.0.1:8011/health`
+- AIcallorder files were backed up before overwrite:
+  - `/opt/AIcallorder/.meeting-digest-backup/20260501-095706`
+- AIcallorder `.env` was updated with:
+  - `MEETING_DIGEST_BOT_BASE_URL`
+  - `MEETING_DIGEST_BOT_TIMEOUT_SECONDS`
+  - `MEETING_DIGEST_SHARED_SECRET`
+- Local Windows packaging was fixed to create Linux-friendly ZIP entries with forward slashes.
+- Telegram poller accepts both direct messages and channel posts:
+  - `allowed_updates=["message", "channel_post"]`
+- Telegram commands can target a group digest without copying a link:
+  - reply to the digest message with `@LLMeets_bot preview`
+  - reply to the digest message with `@LLMeets_bot создать`
+  - the bot builds the same `https://t.me/c/<chat>/<message>` post URL from `reply_to_message`
+- Preview responses include `Источник: <post_url>`.
+- If the user replies to a bot preview with `@LLMeets_bot создать`, `коммент`, `чеклист`, or `обновить`, the bot reuses `Источник` from the replied preview instead of treating the preview itself as a new publication.
+- Old Telegram digest posts can be registered from the group:
+  - reply to the old digest post with `@LLMeets_bot зарегистрировать`
+  - aliases: `register`, `/register`, `зарегистрируй`, `регистрация`
+  - the bot extracts `post_url` from `reply_to_message`, parses Loom URL/video ID, meeting title, Google Doc and Transcript Doc links, then writes the publication into the same state DB that AIcallorder uses through the register endpoint flow
+  - after registration, `preview`, `создать`, and `обновить` work for that old post
+- Explicit commands `обновить`, `коммент`, `чеклист`, and daily-to-weekly require an existing CRM task binding or a task id in the command.
+- `обновить` updates only safe task fields:
+  - `TITLE`
+  - `DESCRIPTION`
+  - `TAGS` when present
+- `обновить` also appends the source comment to the task, but does not recreate checklists.
+- If no target task is known, `обновить` returns an error instead of creating a new task.
+- `обновить` is now a merge/update command, not a destructive replacement:
+  - reads current CRM task description first
+  - if the task has no MeetingDigestBot point structure yet, saves the current CRM description as `Point 1. Предыдущий контекст задачи из CRM`
+  - appends the meeting from the tagged/replied post as the next `Point N`
+  - if the same source post already exists as a point, replaces only that point
+  - uses plain-text markers `=== MEETING_DIGEST_POINT ... ===` for stable re-runs
+  - creates/restores a separate checklist group `Point N: <meeting title>` with QA/PM items from that meeting
+
+### Comment behavior update (2026-05-01)
+
+- `коммент` / `comment` now writes meeting results, not just a short sync marker.
+- The comment is built from processed AIcallorder artifacts by `loom_video_id`:
+  - summary from the processed transcript
+  - accepted decisions
+  - action items / commitments with owner, due, status when present
+  - completed / confirmed items
+  - blockers
+  - remaining tech debt
+  - business requests for estimation
+  - open questions
+  - source links: Loom, Google Doc, Doc section, Transcript Doc, Transcript section
+- The command still requires a target CRM task:
+  - reply to a registered digest post: `@LLMeets_bot коммент 168334`
+  - or use explicit post link: `@LLMeets_bot https://t.me/c/<chat>/<message> коммент 168334`
+- If the digest post is old and was not registered by AIcallorder, first reply to the old post with:
+  - `@LLMeets_bot зарегистрировать`
+- Real VPS validation was done against Loom video:
+  - `b1ef1d39ef8b46b181540a27fb8f265a`
+  - generated comment length: 3356 chars
+  - checklist draft: QA 4 items, PM acceptance 4 items
+
+### CRM comment formatting prompt / rules
+
+Use these rules for any future LLM prompt that prepares text specifically for Bitrix task comments:
+
+```text
+Сформируй комментарий для CRM-задачи в plain text.
+Не используй markdown-таблицы, HTML-таблицы и строки вида `item | owner=... | due=... | status=...`.
+Если в исходных данных есть таблица, преобразуй каждую строку таблицы в отдельный пункт списка.
+Формат структурированных пунктов:
+
+- Основной текст пункта
+  Ответственный: имя
+  Срок: дата или "не указан"
+  Статус: статус
+
+Для запросов на оценку:
+
+- Название запроса
+  Приоритет: высокий/средний/низкий
+  Инициатор: имя, если известно
+  Контекст: кратко
+  Заметки к оценке: кратко
+
+Не выводи пустые поля и значения "-".
+Не используй символ `|` как разделитель колонок.
+Заголовки разделов оставляй обычными строками без markdown-разметки.
+```
+
+- Runtime formatter also protects comments from bad table rendering:
+  - markdown tables are converted into plain text rows
+  - pipe metadata like `owner=`, `due=`, `status=`, `priority=` is converted into indented fields
+
+### Bitrix publication actor update (2026-05-01)
+
+- All new MeetingDigestBot tasks must be created in project `GROUP_ID=512` with:
+  - `CREATED_BY=114736`
+  - `RESPONSIBLE_ID=114736`
+  - `AUDITORS=50760,127124,137230,51977`
+- All task comments must be published through `task.commentitem.add` with:
+  - `AUTHOR_ID=114736`
+- Runtime env keys:
+  - `BITRIX_ACTOR_USER_ID=114736`
+  - `BITRIX_DEFAULT_RESPONSIBLE_ID=114736`
+  - `BITRIX_CREATED_BY_ID=114736`
+  - `BITRIX_DEFAULT_AUDITOR_IDS=50760,127124,137230,51977`
+- Checklist limitation:
+  - Portal manifest for `task.checklistitem.add` exposes writable fields only for `PARENT_ID`, `TITLE`, `SORT_INDEX`, `IS_COMPLETE`, `IS_IMPORTANT`, `MEMBERS`.
+  - `CREATED_BY` is readable/sortable but not writable, so checklist item author is the REST caller/webhook user.
+  - To make checklist items visually authored by user `114736`, the Bitrix webhook/token itself must be issued under user `114736`.

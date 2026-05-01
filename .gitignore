@@ -1,0 +1,35 @@
+# Secrets and local configuration
+.env
+ssh.txt
+*.pem
+*.key
+*.ppk
+
+# Runtime state
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Build / package output
+*.zip
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

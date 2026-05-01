@@ -1,0 +1,19 @@
+[Unit]
+Description=MeetingDigestBot API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+Group=YOUR_LINUX_USER
+WorkingDirectory=/opt/meeting-digest-bot
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/meeting-digest-bot/.env
+ExecStart=/opt/meeting-digest-bot/.venv/bin/python -m uvicorn meeting_digest_bot.app:app --host 127.0.0.1 --port 8011
+Restart=always
+RestartSec=5
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
