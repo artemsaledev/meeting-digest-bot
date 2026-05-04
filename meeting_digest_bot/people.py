@@ -12,6 +12,7 @@ class Person:
     bitrix_user_id: int
     profile_url: str
     aliases: tuple[str, ...]
+    telegram_username: str = ""
 
 
 class PeopleDirectory:
@@ -34,6 +35,7 @@ class PeopleDirectory:
                 bitrix_user_id=int(item["bitrix_user_id"]),
                 profile_url=str(item["profile_url"]),
                 aliases=tuple(str(alias) for alias in item.get("aliases", [])),
+                telegram_username=str(item.get("telegram_username") or "").strip(),
             )
             for item in raw_people
         ]
@@ -56,6 +58,16 @@ class PeopleDirectory:
         person = self.find(name)
         return person.bitrix_user_id if person else None
 
+    def find_by_bitrix_user_id(self, bitrix_user_id: int | str) -> Person | None:
+        try:
+            target_id = int(bitrix_user_id)
+        except (TypeError, ValueError):
+            return None
+        for person in self.people:
+            if person.bitrix_user_id == target_id:
+                return person
+        return None
+
     @staticmethod
     def normalize_name(value: str) -> str:
         text = value.replace("ё", "е").replace("Ё", "Е").casefold()
@@ -72,4 +84,3 @@ class PeopleDirectory:
             or normalized_name.endswith(" " + normalized_alias)
             or f" {normalized_alias} " in f" {normalized_name} "
         )
-

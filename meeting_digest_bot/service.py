@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 import re
 from typing import Any
 
+import requests
+
 from .aicallorder_db import AIcallorderRepository
 from .bitrix_client import BitrixClient
+from .completion_reports import CompletionReportBuilder, DailyCompletionReport
 from .config import Settings
 from .daily_plan import DailyPlanV2Parser
 from .models import (
+    DailyReportRequest,
     DailyRollup,
     DailyPlanSyncRequest,
     DaySyncRequest,
@@ -18,6 +22,7 @@ from .models import (
     SyncAction,
     SyncResult,
     TaskDraft,
+    WeeklyReportRequest,
     WeekSyncRequest,
     WeeklyRollup,
 )
@@ -47,6 +52,7 @@ class MeetingDigestService:
             )
         )
         self.daily_plan_parser = DailyPlanV2Parser()
+        self.completion_reports = CompletionReportBuilder()
 
     def register_publication(self, payload: PublicationRegistrationRequest):
         return self.state.register_publication(payload)
@@ -162,6 +168,207 @@ class MeetingDigestService:
             action=payload.action,
             explicit_task_id=payload.task_id,
         )
+
+    def run_daily_report(self, payload: DailyReportRequest) -> SyncResult:
+        source_type = "daily_plan_report"
+        source_key = f"{payload.report_date.isoformat()}:{payload.team_name}"
+        existing = self.state.get_task_binding(source_type=source_type, source_key=source_key)
+        report = self._build_daily_completion_report(payload.report_date, payload.team_name)
+        comment = self.completion_reports.format_daily_comment(report)
+        telegram_text = self.completion_reports.format_daily_telegram(report)
+        telegram_result = None
+
+        if existing and not payload.force:
+            return SyncResult(
+                action="daily_report_skipped",
+                task_id=report.task_id,
+                task_url=report.task_url,
+                title=f"Итоги плана дня {payload.report_date.strftime('%d.%m.%Y')}",
+                source_type=source_type,
+                source_key=source_key,
+                details={
+                    "reason": "already_reported",
+                    "total": report.total_items,
+                    "completed": report.completed_items,
+                    "open": report.open_count,
+                    "telegram_text": telegram_text,
+                },
+            )
+
+        self._send_task_comment(report.task_id, comment)
+        if payload.send_telegram:
+            telegram_result = self._send_telegram_report(telegram_text)
+        self.state.upsert_task_binding(
+            source_type=source_type,
+            source_key=source_key,
+            bitrix_task_id=report.task_id,
+            mode="reported",
+            title=f"Итоги плана дня {payload.report_date.strftime('%d.%m.%Y')}",
+            meta={
+                "report_date": payload.report_date.isoformat(),
+                "team_name": payload.team_name,
+                "total": report.total_items,
+                "completed": report.completed_items,
+                "open": report.open_count,
+                "telegram": telegram_result,
+                "telegram_text": telegram_text,
+            },
+        )
+        return SyncResult(
+            action="daily_reported",
+            task_id=report.task_id,
+            task_url=report.task_url,
+            title=f"Итоги плана дня {payload.report_date.strftime('%d.%m.%Y')}",
+            source_type=source_type,
+            source_key=source_key,
+            details={
+                "total": report.total_items,
+                "completed": report.completed_items,
+                "open": report.open_count,
+                "telegram": telegram_result,
+                "telegram_text": telegram_text,
+            },
+        )
+
+    def run_weekly_report(self, payload: WeeklyReportRequest) -> SyncResult:
+        source_type = "daily_plan_weekly_report"
+        source_key = f"{payload.week_from.isoformat()}:{payload.week_to.isoformat()}:{payload.team_name}"
+        existing = self.state.get_task_binding(source_type=source_type, source_key=source_key)
+        reports = self._build_daily_completion_reports_between(payload.week_from, payload.week_to, payload.team_name)
+        comment = self.completion_reports.format_weekly_comment(
+            week_from=payload.week_from,
+            week_to=payload.week_to,
+            team_name=payload.team_name,
+            reports=reports,
+        )
+        telegram_result = None
+        weekly_task_id = self._weekly_task_id(payload.week_from, payload.week_to)
+
+        if existing and not payload.force:
+            return SyncResult(
+                action="weekly_report_skipped",
+                task_id=weekly_task_id,
+                task_url=self._task_url(weekly_task_id) if weekly_task_id else None,
+                title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
+                source_type=source_type,
+                source_key=source_key,
+            details=self._weekly_report_details(reports) | {"reason": "already_reported"},
+            )
+
+        if weekly_task_id:
+            self._send_task_comment(weekly_task_id, comment)
+        if payload.send_telegram:
+            telegram_result = self._send_telegram_report(comment)
+        self.state.upsert_task_binding(
+            source_type=source_type,
+            source_key=source_key,
+            bitrix_task_id=weekly_task_id or 0,
+            mode="reported",
+            title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
+            meta=self._weekly_report_details(reports) | {
+                "week_from": payload.week_from.isoformat(),
+                "week_to": payload.week_to.isoformat(),
+                "team_name": payload.team_name,
+                "telegram": telegram_result,
+                "telegram_text": comment,
+            },
+        )
+        return SyncResult(
+            action="weekly_reported",
+            task_id=weekly_task_id,
+            task_url=self._task_url(weekly_task_id) if weekly_task_id else None,
+            title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
+            source_type=source_type,
+            source_key=source_key,
+            details=self._weekly_report_details(reports) | {"telegram": telegram_result, "telegram_text": comment},
+        )
+
+    def _build_daily_completion_report(self, report_date: date, team_name: str) -> DailyCompletionReport:
+        task_id = self._daily_plan_task_id(report_date, team_name)
+        if not task_id:
+            raise ValueError(f"Daily plan task is not found for {report_date.isoformat()} / {team_name}.")
+        if not self._task_exists(task_id):
+            raise ValueError(f"Daily plan task #{task_id} is not found or unavailable in CRM.")
+        checklist_rows = self.bitrix.list_checklist_items(task_id)
+        return self.completion_reports.build_daily(
+            report_date=report_date,
+            team_name=team_name,
+            task_id=task_id,
+            task_url=self._task_url(task_id),
+            checklist_rows=checklist_rows,
+        )
+
+    def _build_daily_completion_reports_between(
+        self,
+        week_from: date,
+        week_to: date,
+        team_name: str,
+    ) -> list[DailyCompletionReport]:
+        reports: list[DailyCompletionReport] = []
+        current = week_from
+        while current <= week_to:
+            try:
+                reports.append(self._build_daily_completion_report(current, team_name))
+            except ValueError:
+                pass
+            current += timedelta(days=1)
+        return reports
+
+    def _daily_plan_task_id(self, report_date: date, team_name: str) -> int | None:
+        binding = self.state.get_task_binding(
+            source_type="daily_plan",
+            source_key=f"{report_date.isoformat()}:{team_name}",
+        )
+        if not binding:
+            return None
+        try:
+            return int(binding["bitrix_task_id"])
+        except (TypeError, ValueError):
+            return None
+
+    def _weekly_task_id(self, week_from: date, week_to: date) -> int | None:
+        binding = self.state.get_task_binding(
+            source_type="weekly_digest",
+            source_key=f"{week_from.isoformat()}:{week_to.isoformat()}",
+        )
+        if not binding:
+            return None
+        try:
+            task_id = int(binding["bitrix_task_id"])
+        except (TypeError, ValueError):
+            return None
+        return task_id if task_id and self._task_exists(task_id) else None
+
+    @staticmethod
+    def _weekly_report_details(reports: list[DailyCompletionReport]) -> dict[str, Any]:
+        total = sum(report.total_items for report in reports)
+        completed = sum(report.completed_items for report in reports)
+        open_count = sum(report.open_count for report in reports)
+        return {
+            "days_found": len(reports),
+            "total": total,
+            "completed": completed,
+            "open": open_count,
+            "daily_tasks": [report.task_id for report in reports],
+        }
+
+    def _send_telegram_report(self, text: str) -> dict[str, Any]:
+        if not self.settings.telegram_bot_token:
+            return {"sent": False, "reason": "telegram_bot_token_missing"}
+        chat_id = self.settings.telegram_report_chat_id or self.state.get_latest_telegram_chat_id()
+        if not chat_id:
+            return {"sent": False, "reason": "telegram_report_chat_id_missing"}
+        response = requests.post(
+            f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text[:4000],
+                "disable_web_page_preview": True,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        return {"sent": True, "chat_id": str(chat_id)}
 
     def _apply_task_draft(
         self,

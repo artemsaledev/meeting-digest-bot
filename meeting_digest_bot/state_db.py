@@ -229,6 +229,20 @@ class StateRepository:
             )
             conn.commit()
 
+    def get_latest_telegram_chat_id(self) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT telegram_chat_id
+                FROM publications
+                WHERE telegram_chat_id IS NOT NULL
+                  AND telegram_chat_id != ''
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return str(row[0]) if row and row[0] else None
+
     def save_weekly_rollup(
         self,
         *,

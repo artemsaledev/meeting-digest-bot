@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 import re
+from zoneinfo import ZoneInfo
 
 import requests
 
 from .models import (
     DailyPlanSyncRequest,
+    DailyReportRequest,
     DigestType,
     DaySyncRequest,
     PostSyncRequest,
@@ -16,6 +18,7 @@ from .models import (
     TelegramCommand,
     TelegramResponse,
     WeekSyncRequest,
+    WeeklyReportRequest,
 )
 from .service import MeetingDigestService
 from .telegram_links import extract_post_link, extract_task_id
@@ -29,6 +32,14 @@ PLAN_COMMAND_RE = re.compile(
 )
 WEEK_COMMAND_RE = re.compile(
     r"/week(?:@[A-Za-z0-9_]+)?\s+(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
+REPORT_COMMAND_RE = re.compile(
+    r"(?:/report(?:@[A-Za-z0-9_]+)?|итоги|результаты)\s*(вчера|\d{4}-\d{2}-\d{2})?",
+    re.IGNORECASE,
+)
+WEEKLY_REPORT_COMMAND_RE = re.compile(
+    r"(?:/weekly_report(?:@[A-Za-z0-9_]+)?|итоги\s+недели|результаты\s+недели)\s+(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})",
     re.IGNORECASE,
 )
 LOOM_URL_RE = re.compile(r"https?://(?:www\.)?loom\.com/share/([A-Za-z0-9]+)[^\s]*", re.IGNORECASE)
@@ -66,6 +77,12 @@ class TelegramBotFacade:
             if chat_id:
                 self.send_message(chat_id, response.text)
             return response
+
+        report_response = self._process_report_command(text)
+        if report_response:
+            if chat_id:
+                self.send_message(chat_id, report_response.text)
+            return report_response
 
         command = self._parse_command(text, message=message)
         action = SyncAction.preview if command.action == SyncAction.auto else command.action
@@ -132,6 +149,47 @@ class TelegramBotFacade:
         if chat_id:
             self.send_message(chat_id, response.text)
         return response
+
+    def _process_report_command(self, text: str) -> TelegramResponse | None:
+        if not BOT_MENTION_RE.search(text) and not text.strip().startswith(("/report", "/weekly_report")):
+            return None
+        command_text = self._strip_bot_mention(text)
+        weekly_match = WEEKLY_REPORT_COMMAND_RE.search(command_text)
+        if weekly_match:
+            result = self.service.run_weekly_report(
+                WeeklyReportRequest(
+                    week_from=date.fromisoformat(weekly_match.group(1)),
+                    week_to=date.fromisoformat(weekly_match.group(2)),
+                    force=True,
+                    send_telegram=False,
+                )
+            )
+            return TelegramResponse(
+                ok=True,
+                text=str((result.details or {}).get("telegram_text") or self._format_sync_result("итогов недели", result)),
+                payload=result.model_dump(),
+            )
+
+        match = REPORT_COMMAND_RE.search(command_text)
+        if not match:
+            return None
+        raw_date = (match.group(1) or "").strip().lower()
+        if raw_date == "вчера" or not raw_date:
+            report_date = datetime.now(ZoneInfo("Europe/Kyiv")).date() - timedelta(days=1)
+        else:
+            report_date = date.fromisoformat(raw_date)
+        result = self.service.run_daily_report(
+            DailyReportRequest(
+                report_date=report_date,
+                force=True,
+                send_telegram=False,
+            )
+        )
+        return TelegramResponse(
+            ok=True,
+            text=str((result.details or {}).get("telegram_text") or self._format_sync_result("итогов плана дня", result)),
+            payload=result.model_dump(),
+        )
 
     def send_message(self, chat_id: int | str, text: str) -> dict:
         response = requests.post(

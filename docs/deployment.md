@@ -89,6 +89,25 @@ sudo systemctl enable --now meeting-digest-bot-api.service
 sudo systemctl enable --now meeting-digest-bot-poller.service
 ```
 
+## Cron Reports
+
+Daily and weekly checklist reports are scheduled through cron:
+
+```bash
+sudo cp deploy/linux/cron.d/meeting-digest-bot-reports /etc/cron.d/meeting-digest-bot-reports
+sudo chmod 0644 /etc/cron.d/meeting-digest-bot-reports
+sudo systemctl restart cron || sudo systemctl restart crond
+```
+
+Schedule:
+
+```text
+09:00 Europe/Kyiv every day: daily-report --yesterday
+16:00 Europe/Kyiv every Friday: weekly-report --current-week
+```
+
+The daily report adds a comment to the day plan task and posts a Telegram report with responsible usernames for open checklist items. The weekly report tags all responsible users with open items at once.
+
 ## Verify
 
 ```bash

@@ -1,0 +1,5 @@
+SHELL=/bin/bash
+CRON_TZ=Europe/Kyiv
+
+0 9 * * * root cd /opt/meeting-digest-bot && .venv/bin/python -m meeting_digest_bot daily-report --yesterday >> /var/log/meeting-digest-bot-daily-report.log 2>&1
+0 16 * * 5 root cd /opt/meeting-digest-bot && .venv/bin/python -m meeting_digest_bot weekly-report --current-week >> /var/log/meeting-digest-bot-weekly-report.log 2>&1

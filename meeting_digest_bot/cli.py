@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from .config import Settings
-from .models import DailyPlanSyncRequest, PostSyncRequest, PublicationRegistrationRequest, SyncAction, WeekSyncRequest
+from .models import DailyPlanSyncRequest, DailyReportRequest, PostSyncRequest, PublicationRegistrationRequest, SyncAction, WeekSyncRequest, WeeklyReportRequest
 from .service import MeetingDigestService
 from .telegram_bot import TelegramBotFacade
 from .telegram_poller import TelegramPollingWorker
@@ -51,6 +52,21 @@ def build_parser() -> argparse.ArgumentParser:
     sync_daily_plan.add_argument("--action", choices=[item.value for item in SyncAction], default="preview")
     sync_daily_plan.add_argument("--task-id", type=int)
     sync_daily_plan.add_argument("--team-name", default="Bitrix Develop Team")
+
+    daily_report = subparsers.add_parser("daily-report")
+    daily_report.add_argument("--report-date")
+    daily_report.add_argument("--yesterday", action="store_true")
+    daily_report.add_argument("--team-name", default="Bitrix Develop Team")
+    daily_report.add_argument("--force", action="store_true")
+    daily_report.add_argument("--no-telegram", action="store_true")
+
+    weekly_report = subparsers.add_parser("weekly-report")
+    weekly_report.add_argument("--week-from")
+    weekly_report.add_argument("--week-to")
+    weekly_report.add_argument("--current-week", action="store_true")
+    weekly_report.add_argument("--team-name", default="Bitrix Develop Team")
+    weekly_report.add_argument("--force", action="store_true")
+    weekly_report.add_argument("--no-telegram", action="store_true")
 
     poll = subparsers.add_parser("poll-telegram")
     poll.add_argument("--once", action="store_true")
@@ -136,6 +152,33 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "daily-report":
+        report_date = _report_date_arg(args.report_date, yesterday=args.yesterday)
+        result = service.run_daily_report(
+            DailyReportRequest(
+                report_date=report_date,
+                team_name=args.team_name,
+                force=args.force,
+                send_telegram=not args.no_telegram,
+            )
+        )
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "weekly-report":
+        week_from, week_to = _week_args(args.week_from, args.week_to, current_week=args.current_week)
+        result = service.run_weekly_report(
+            WeeklyReportRequest(
+                week_from=week_from,
+                week_to=week_to,
+                team_name=args.team_name,
+                force=args.force,
+                send_telegram=not args.no_telegram,
+            )
+        )
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "poll-telegram":
         if not settings.telegram_bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
@@ -149,3 +192,25 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 1
+
+
+def _kyiv_today() -> date:
+    return datetime.now(ZoneInfo("Europe/Kyiv")).date()
+
+
+def _report_date_arg(raw: str | None, *, yesterday: bool) -> date:
+    if raw:
+        return date.fromisoformat(raw)
+    today = _kyiv_today()
+    return today - timedelta(days=1) if yesterday else today
+
+
+def _week_args(raw_from: str | None, raw_to: str | None, *, current_week: bool) -> tuple[date, date]:
+    if raw_from and raw_to:
+        return date.fromisoformat(raw_from), date.fromisoformat(raw_to)
+    if current_week:
+        today = _kyiv_today()
+        monday = today - timedelta(days=today.weekday())
+        friday = monday + timedelta(days=4)
+        return monday, friday
+    raise ValueError("Provide --week-from and --week-to, or use --current-week.")

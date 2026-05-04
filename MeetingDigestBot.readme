@@ -803,3 +803,35 @@ Use these rules for any future LLM prompt that prepares text specifically for Bi
   - Игорь Закорчемный / `426`
   - Валентин Семенихин / `162783`
   - Андрей Решетицкий / `163323`
+
+### Daily / weekly completion reports (2026-05-04)
+
+- Added daily completion report from daily-plan checklist state.
+- Source of truth:
+  - child checklist rows in the daily-plan task;
+  - `IS_COMPLETE=Y` means done;
+  - checklist `members` identify responsible users;
+  - parent checklist group name is used as fallback.
+- Daily report behavior:
+  - adds a comment to the daily-plan task;
+  - sends a Telegram report to `TELEGRAM_REPORT_CHAT_ID` or the latest registered Telegram chat;
+  - tags responsible users by Telegram username for each open checklist item;
+  - does not move open items to the next day.
+- Weekly report behavior:
+  - scans daily-plan tasks in the selected week range;
+  - aggregates all open checklist items;
+  - sends a weekly Telegram report tagging all responsible users with open items at once;
+  - if a weekly CRM task exists for `weekly_digest`, adds the weekly report as a comment there too.
+- Telegram commands:
+  - `@LLMeets_bot итоги вчера`
+  - `@LLMeets_bot итоги 2026-05-04`
+  - `@LLMeets_bot итоги недели 2026-05-04 2026-05-08`
+- CLI commands:
+  - `python -m meeting_digest_bot daily-report --yesterday`
+  - `python -m meeting_digest_bot daily-report --report-date 2026-05-04 --force`
+  - `python -m meeting_digest_bot weekly-report --current-week`
+  - `python -m meeting_digest_bot weekly-report --week-from 2026-05-04 --week-to 2026-05-08 --force`
+- Cron on VPS:
+  - `CRON_TZ=Europe/Kyiv`
+  - every day at `09:00`: `daily-report --yesterday`
+  - every Friday at `16:00`: `weekly-report --current-week`

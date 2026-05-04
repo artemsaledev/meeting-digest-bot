@@ -65,6 +65,21 @@ class DailyPlanSyncRequest(BaseModel):
     team_name: str = "Bitrix Develop Team"
 
 
+class DailyReportRequest(BaseModel):
+    report_date: date
+    team_name: str = "Bitrix Develop Team"
+    force: bool = False
+    send_telegram: bool = True
+
+
+class WeeklyReportRequest(BaseModel):
+    week_from: date
+    week_to: date
+    team_name: str = "Bitrix Develop Team"
+    force: bool = False
+    send_telegram: bool = True
+
+
 class ChecklistItem(BaseModel):
     title: str
     members: list[int] = Field(default_factory=list)

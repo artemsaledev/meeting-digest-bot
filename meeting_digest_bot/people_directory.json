@@ -3,42 +3,49 @@
     "full_name": "Иван Карповец",
     "bitrix_user_id": 51977,
     "profile_url": "https://totiscrm.com/company/personal/user/51977/",
+    "telegram_username": "@karpovets90",
     "aliases": ["Иван", "Іван", "Ваня", "Карповец", "Карповець", "Иван Карповец", "Іван Карповець", "Ваня Карповец", "Ваня Карповець"]
   },
   {
     "full_name": "Анатолий Карповец",
     "bitrix_user_id": 58194,
     "profile_url": "https://totiscrm.com/company/personal/user/58194/",
+    "telegram_username": "@anatolii_karpovets",
     "aliases": ["Анатолий", "Анатолій", "Толя", "Карповец", "Карповець", "Анатолий Карповец", "Анатолій Карповець", "Анатолий Карпович", "Анатолій Карпович"]
   },
   {
     "full_name": "Михаил Конев",
     "bitrix_user_id": 127124,
     "profile_url": "https://totiscrm.com/company/personal/user/127124/",
+    "telegram_username": "@mishakonev19",
     "aliases": ["Михаил", "Михайло", "Миша", "Міша", "Конев", "Коньов", "Михаил Конев", "Михайло Конев", "Михайло Коньов", "Миша Адам", "Міша Адам"]
   },
   {
     "full_name": "Артем Явдокименко",
     "bitrix_user_id": 114736,
     "profile_url": "https://totiscrm.com/company/personal/user/114736/",
+    "telegram_username": "@artsaledev",
     "aliases": ["Артем", "Артём", "Явдокименко", "Артем Явдокименко", "Артём Явдокименко"]
   },
   {
     "full_name": "Виктор Шавловский",
     "bitrix_user_id": 137230,
     "profile_url": "https://totiscrm.com/company/personal/user/137230/",
+    "telegram_username": "@Shavlovskiy",
     "aliases": ["Виктор", "Віктор", "Витя", "Вітя", "Шавловский", "Шавловський", "Шоворский", "Шоворський", "Виктор Шавловский", "Віктор Шавловський", "Витя Шавловский", "Вітя Шавловський", "Витя Шоворский", "Вітя Шоворський"]
   },
   {
     "full_name": "Эмиль Смолин",
     "bitrix_user_id": 50760,
     "profile_url": "https://totiscrm.com/company/personal/user/50760/",
+    "telegram_username": "@EEmiiii",
     "aliases": ["Эмиль", "Смолин", "Эмиль Смолин"]
   },
   {
     "full_name": "Николай Ладенко",
     "bitrix_user_id": 123170,
     "profile_url": "https://totiscrm.com/company/personal/user/123170/",
+    "telegram_username": "@nickolayladenko",
     "aliases": ["Николай", "Коля", "Ладенко", "Николай Ладенко"]
   },
   {
@@ -51,18 +58,21 @@
     "full_name": "Игорь Закорчемный",
     "bitrix_user_id": 426,
     "profile_url": "https://totiscrm.com/company/personal/user/426/",
+    "telegram_username": "@igorzakor",
     "aliases": ["Игорь", "Закорчемный", "Игорь Закорчемный"]
   },
   {
     "full_name": "Валентин Семенихин",
     "bitrix_user_id": 162783,
     "profile_url": "https://totiscrm.com/company/personal/user/162783/",
+    "telegram_username": "@v_semenikhin",
     "aliases": ["Валентин", "Валик", "Семенихин", "Валентин Семенихин"]
   },
   {
     "full_name": "Андрей Решетицкий",
     "bitrix_user_id": 163323,
     "profile_url": "https://totiscrm.com/company/personal/user/163323/",
+    "telegram_username": "@rufelliy",
     "aliases": ["Андрей", "Андрій", "Решетицкий", "Решетицький", "Решетички", "Андрей Решетицкий", "Андрій Решетицький", "Андрей Решетички", "Андрій Решетички"]
   }
 ]
