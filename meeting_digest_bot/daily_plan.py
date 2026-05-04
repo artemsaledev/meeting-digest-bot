@@ -127,6 +127,7 @@ class DailyPlanParser:
         source_meeting_title: str | None,
     ) -> None:
         title = self._clean_item_text(item_text)
+        title = self._strip_question_lead(title)
         if not title or self._is_noise_line(title):
             return
         if not self._looks_like_task_item(title) or self._is_conversational_line(title):
@@ -279,6 +280,12 @@ class DailyPlanParser:
                 "спасибо за просмотр",
                 "у мене поки все",
                 "у меня пока все",
+                "я не знаю до кого",
+                "ігор прочитає функціонал",
+                "игор прочитает функционал",
+                "ну він мені вказав",
+                "ну он мне указал",
+                "щоб файликом загружати",
             )
         )
 
@@ -302,6 +309,13 @@ class DailyPlanParser:
                 "так в принципе",
             )
         )
+
+    @staticmethod
+    def _strip_question_lead(text: str) -> str:
+        if "?" not in text:
+            return text
+        tail = text.split("?")[-1].strip()
+        return tail or ""
 
     def _find_exact_person(self, value: str) -> Person | None:
         normalized = PeopleDirectory.normalize_name(value)
