@@ -252,27 +252,33 @@ class MeetingDigestService:
                 title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
                 source_type=source_type,
                 source_key=source_key,
-            details=self._weekly_report_details(reports) | {"reason": "already_reported"},
+                details=self._weekly_report_details(reports) | {
+                    "reason": "already_reported",
+                    "telegram_text": comment,
+                },
             )
 
+        did_comment = False
         if weekly_task_id:
             self._send_task_comment(weekly_task_id, comment)
+            did_comment = True
         if payload.send_telegram:
             telegram_result = self._send_telegram_report(comment)
-        self.state.upsert_task_binding(
-            source_type=source_type,
-            source_key=source_key,
-            bitrix_task_id=weekly_task_id or 0,
-            mode="reported",
-            title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
-            meta=self._weekly_report_details(reports) | {
-                "week_from": payload.week_from.isoformat(),
-                "week_to": payload.week_to.isoformat(),
-                "team_name": payload.team_name,
-                "telegram": telegram_result,
-                "telegram_text": comment,
-            },
-        )
+        if did_comment or telegram_result:
+            self.state.upsert_task_binding(
+                source_type=source_type,
+                source_key=source_key,
+                bitrix_task_id=weekly_task_id or 0,
+                mode="reported",
+                title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
+                meta=self._weekly_report_details(reports) | {
+                    "week_from": payload.week_from.isoformat(),
+                    "week_to": payload.week_to.isoformat(),
+                    "team_name": payload.team_name,
+                    "telegram": telegram_result,
+                    "telegram_text": comment,
+                },
+            )
         return SyncResult(
             action="weekly_reported",
             task_id=weekly_task_id,
