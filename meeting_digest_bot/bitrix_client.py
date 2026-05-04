@@ -144,7 +144,12 @@ class BitrixClient:
                 )
 
     def add_checklist_group_deduped(self, task_id: int, title: str, items: list[Any]) -> dict[str, Any]:
-        existing = self.list_checklist_items(task_id)
+        dedupe_error = ""
+        try:
+            existing = self.list_checklist_items(task_id)
+        except Exception as exc:
+            existing = []
+            dedupe_error = str(exc)
         diff = self.preview_checklist_group_dedupe(existing, title, items)
         parent_id = int(diff.get("parent_id") or 0)
 
@@ -172,12 +177,15 @@ class BitrixClient:
             existing_item_titles.add(normalized)
             added += 1
 
-        return {
+        result = {
             "group": title,
             "parent_id": parent_id,
             "added": added,
             "skipped": skipped,
         }
+        if dedupe_error:
+            result["dedupe_error"] = dedupe_error
+        return result
 
     def preview_checklist_group_dedupe(
         self,
