@@ -219,14 +219,6 @@ def build_daily_plan_task_draft(
         if items:
             checklist_groups.append(ChecklistGroup(title=person_plan.person_name, items=items))
 
-    if plan.unmatched_items:
-        checklist_groups.append(
-            ChecklistGroup(
-                title="Не назначено",
-                items=[ChecklistItem(title=item, members=[]) for item in plan.unmatched_items],
-            )
-        )
-
     comment_lines = [
         f"План дня сформирован из #daily встреч за {plan.report_date.strftime('%d.%m.%Y')}.",
         f"Команда: {plan.team_name}",

@@ -161,8 +161,17 @@ class DailyPlanParser:
                 pattern = re.compile(rf"^{re.escape(alias)}\b[,:;.\-\s]*(.*)$", flags=re.IGNORECASE)
                 match = pattern.match(cleaned)
                 remainder = match.group(1).strip() if match else ""
-                if match and self._is_structured_remainder(remainder):
-                    return person, remainder
+                if match:
+                    prompt_tail = self._tail_after_person_prompt(remainder)
+                    if prompt_tail is not None:
+                        return person, prompt_tail
+                    if self._is_structured_remainder(remainder):
+                        return person, remainder
+                    if not remainder:
+                        return person, ""
+                embedded = self._extract_embedded_person_prompt(cleaned, alias)
+                if embedded is not None:
+                    return person, embedded
         return None, ""
 
     def _extract_section_and_inline_item(self, line: str, current_section: str) -> tuple[str, str]:
@@ -247,7 +256,7 @@ class DailyPlanParser:
     @staticmethod
     def _is_noise_line(text: str) -> bool:
         normalized = PeopleDirectory.normalize_name(text)
-        return normalized in {
+        if normalized in {
             "нет",
             "нет блокеров",
             "без блокеров",
@@ -255,7 +264,21 @@ class DailyPlanParser:
             "ок",
             "окей",
             "спасибо",
-        } or normalized.startswith("daily ") or normalized.startswith("команда ")
+        }:
+            return True
+        if normalized.startswith("daily ") or normalized.startswith("команда "):
+            return True
+        return any(
+            marker in normalized
+            for marker in (
+                "нічого не робив",
+                "ничего не делал",
+                "дякую за перегляд",
+                "спасибо за просмотр",
+                "у мене поки все",
+                "у меня пока все",
+            )
+        )
 
     def _find_exact_person(self, value: str) -> Person | None:
         normalized = PeopleDirectory.normalize_name(value)
@@ -275,6 +298,50 @@ class DailyPlanParser:
             return False
         section, item = self._match_section_marker(remainder)
         return bool(section and (item or normalized in self._all_section_markers()))
+
+    def _extract_embedded_person_prompt(self, line: str, alias: str) -> str | None:
+        if not re.search(rf"\b{re.escape(alias)}\b", line, flags=re.IGNORECASE):
+            return None
+        normalized = PeopleDirectory.normalize_name(line)
+        if not self._contains_person_prompt(normalized):
+            return None
+        parts = re.split(rf"\b{re.escape(alias)}\b", line, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) < 2:
+            return None
+        return self._tail_after_person_prompt(parts[1]) or ""
+
+    def _tail_after_person_prompt(self, text: str) -> str | None:
+        normalized = PeopleDirectory.normalize_name(text)
+        if not normalized or not self._contains_person_prompt(normalized):
+            return None
+        if "?" in text:
+            return text.split("?", 1)[1].strip()
+        lowered = text.casefold()
+        for marker in ("план.", "план:", "план -", "план —"):
+            index = lowered.find(marker)
+            if index >= 0:
+                return text[index + len(marker) :].strip()
+        return ""
+
+    @staticmethod
+    def _contains_person_prompt(normalized: str) -> bool:
+        return any(
+            marker in normalized
+            for marker in (
+                "який в тебе",
+                "какой у тебя",
+                "у тебе який",
+                "у тебя какой",
+                "в тебе який",
+                "в тебе є",
+                "що в тебе в роботі",
+                "что у тебя в работе",
+                "твій план",
+                "свій план",
+                "план тестів",
+                "план тестов",
+            )
+        )
 
     @classmethod
     def _match_section_marker(cls, line: str) -> tuple[str | None, str]:
