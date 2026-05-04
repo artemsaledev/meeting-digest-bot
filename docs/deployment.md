@@ -41,6 +41,16 @@ chmod +x deploy/linux/install_runtime_ubuntu.sh deploy/linux/verify.sh
 APP_DIR=/opt/meeting-digest-bot ./deploy/linux/install_runtime_ubuntu.sh
 ```
 
+For subsequent releases, upload the archive to `/tmp/meeting-digest-bot-release.zip`
+and apply it without deleting runtime files:
+
+```bash
+cd /opt/meeting-digest-bot
+APP_DIR=/opt/meeting-digest-bot ZIP_PATH=/tmp/meeting-digest-bot-release.zip bash deploy/linux/apply_release.sh
+```
+
+The release applier keeps `.env`, `data/`, `.venv/`, and `.deploy-backup/`.
+
 ## Environment
 
 Create `/opt/meeting-digest-bot/.env` from:
