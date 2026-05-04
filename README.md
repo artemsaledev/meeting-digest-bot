@@ -41,11 +41,15 @@ Reply to a Loom digest post in the Telegram group:
 @LLMeets_bot чеклист 166229
 @LLMeets_bot обновить 166229
 @LLMeets_bot зарегистрировать
+@LLMeets_bot план 2026-05-04 создать
+@LLMeets_bot итоги вчера
+@LLMeets_bot итоги недели 2026-05-04 2026-05-08
 ```
 
 Use `preview` first when unsure. If a post is old and not registered, reply to it with `@LLMeets_bot зарегистрировать`, then run the needed command again.
 
-More details: [Telegram Usage](docs/telegram-usage.md).
+User-facing command guide: [Telegram User Guide](docs/user-telegram-guide.md).
+Technical command notes: [Telegram Usage](docs/telegram-usage.md).
 
 ## CRM Publication Modes
 
@@ -58,6 +62,8 @@ More details: [Telegram Usage](docs/telegram-usage.md).
 More details: [Bitrix Publication Rules](docs/bitrix-publication.md).
 
 Daily planning design: [Daily Plan](docs/daily-plan.md).
+
+Daily completion reports do not move open checklist items to the next day. They only read checklist completion status, add a report comment to the day task, and tag responsible users in Telegram. Cron runs daily reports at `09:00 Europe/Kyiv` and weekly daily-plan reports every Friday at `16:00 Europe/Kyiv`.
 
 ## Local Development
 

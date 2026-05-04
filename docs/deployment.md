@@ -76,8 +76,11 @@ BITRIX_DEFAULT_AUDITOR_IDS=50760,127124,137230,51977
 BITRIX_DAILY_PLAN_ACCOMPLICE_IDS=51977,58194,127124,114736,137230,50760,123170,120601,426,162783,163323
 
 TELEGRAM_BOT_TOKEN=...
+TELEGRAM_REPORT_CHAT_ID=
 MEETING_DIGEST_SHARED_SECRET=...
 ```
+
+`TELEGRAM_REPORT_CHAT_ID` is optional. If it is empty, the service uses the latest Telegram chat ID registered from `AIcallorder` publications.
 
 ## Systemd
 
@@ -107,6 +110,16 @@ Schedule:
 ```
 
 The daily report adds a comment to the day plan task and posts a Telegram report with responsible usernames for open checklist items. The weekly report tags all responsible users with open items at once.
+
+Manual report commands on the VPS:
+
+```bash
+cd /opt/meeting-digest-bot
+.venv/bin/python -m meeting_digest_bot daily-report --report-date 2026-05-04 --no-telegram --force
+.venv/bin/python -m meeting_digest_bot weekly-report --week-from 2026-05-04 --week-to 2026-05-08 --no-telegram --force
+```
+
+`--no-telegram` suppresses Telegram sending. For weekly reports, a run without Telegram and without an existing weekly CRM task is safe for dry checks: it prepares output but does not mark the weekly report as published.
 
 ## Verify
 
