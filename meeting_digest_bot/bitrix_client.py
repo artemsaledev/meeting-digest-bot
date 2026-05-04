@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+from requests import HTTPError
 
 
 class BitrixClientError(RuntimeError):
@@ -24,7 +25,10 @@ class BitrixClient:
         payload = payload or {}
         url = self._build_url(method)
         response = requests.post(url, json=payload, timeout=self.timeout_seconds)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except HTTPError as exc:
+            raise BitrixClientError(self._format_http_error(exc, response)) from exc
         data = response.json()
         if "error" in data:
             raise BitrixClientError(f"{data.get('error')}: {data.get('error_description')}")
@@ -107,7 +111,7 @@ class BitrixClient:
             "IS_COMPLETE": "N",
         }
         if members:
-            fields["MEMBERS"] = [int(member) for member in members]
+            fields["MEMBERS"] = self._format_checklist_members(members)
         data = self.call(
             "task.checklistitem.add",
             {
@@ -279,3 +283,20 @@ class BitrixClient:
             except (TypeError, ValueError):
                 continue
         return result
+
+    @staticmethod
+    def _format_checklist_members(members: list[int]) -> dict[str, dict[str, str]]:
+        return {str(int(member)): {"TYPE": "A"} for member in members}
+
+    @staticmethod
+    def _format_http_error(exc: HTTPError, response: requests.Response) -> str:
+        body = response.text[:1000]
+        try:
+            data = response.json()
+        except ValueError:
+            return f"{exc}. Response body: {body}"
+        error = data.get("error")
+        description = data.get("error_description")
+        if error or description:
+            return f"{response.status_code} {error}: {description}"
+        return f"{exc}. Response body: {body}"
