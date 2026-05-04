@@ -388,6 +388,8 @@ class MeetingDigestService:
             fields["CREATED_BY"] = self.settings.bitrix_created_by_id
         if self.settings.bitrix_default_auditor_ids:
             fields["AUDITORS"] = self.settings.bitrix_default_auditor_ids
+        if self._is_daily_plan_draft(draft) and self.settings.bitrix_daily_plan_accomplice_ids:
+            fields["ACCOMPLICES"] = self.settings.bitrix_daily_plan_accomplice_ids
         if draft.tags:
             fields["TAGS"] = draft.tags
         return fields
@@ -397,6 +399,8 @@ class MeetingDigestService:
             "TITLE": draft.title,
             "DESCRIPTION": draft.description,
         }
+        if self._is_daily_plan_draft(draft) and self.settings.bitrix_daily_plan_accomplice_ids:
+            fields["ACCOMPLICES"] = self.settings.bitrix_daily_plan_accomplice_ids
         if draft.tags:
             fields["TAGS"] = draft.tags
         return fields
@@ -405,9 +409,15 @@ class MeetingDigestService:
         fields: dict[str, Any] = {
             "DESCRIPTION": description,
         }
+        if self._is_daily_plan_draft(draft) and self.settings.bitrix_daily_plan_accomplice_ids:
+            fields["ACCOMPLICES"] = self.settings.bitrix_daily_plan_accomplice_ids
         if draft.tags:
             fields["TAGS"] = draft.tags
         return fields
+
+    @staticmethod
+    def _is_daily_plan_draft(draft: TaskDraft) -> bool:
+        return bool(draft.meta.get("daily_plan"))
 
     def _get_task_description(self, task_id: int) -> str:
         data = self.bitrix.get_task(task_id, select=["ID", "TITLE", "DESCRIPTION"])

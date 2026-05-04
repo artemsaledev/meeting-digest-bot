@@ -8,6 +8,19 @@ from pathlib import Path
 
 DEFAULT_BITRIX_ACTOR_USER_ID = 114736
 DEFAULT_BITRIX_AUDITOR_IDS = [50760, 127124, 137230, 51977]
+DEFAULT_DAILY_PLAN_ACCOMPLICE_IDS = [
+    51977,
+    58194,
+    127124,
+    114736,
+    137230,
+    50760,
+    123170,
+    120601,
+    426,
+    162783,
+    163323,
+]
 
 
 def _load_dotenv_file(dotenv_path: Path) -> dict[str, str]:
@@ -84,6 +97,7 @@ class Settings:
     bitrix_default_responsible_id: int | None
     bitrix_created_by_id: int | None
     bitrix_default_auditor_ids: list[int]
+    bitrix_daily_plan_accomplice_ids: list[int]
     bitrix_tags: list[str]
     telegram_bot_token: str | None
     telegram_webhook_secret: str | None
@@ -139,6 +153,10 @@ class Settings:
             bitrix_default_auditor_ids=_parse_int_list(
                 get_value("BITRIX_DEFAULT_AUDITOR_IDS"),
                 DEFAULT_BITRIX_AUDITOR_IDS,
+            ),
+            bitrix_daily_plan_accomplice_ids=_parse_int_list(
+                get_value("BITRIX_DAILY_PLAN_ACCOMPLICE_IDS"),
+                DEFAULT_DAILY_PLAN_ACCOMPLICE_IDS,
             ),
             bitrix_tags=tags,
             telegram_bot_token=get_value("TELEGRAM_BOT_TOKEN"),

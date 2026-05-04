@@ -784,3 +784,22 @@ Use these rules for any future LLM prompt that prepares text specifically for Bi
     - old noisy checklist items deleted;
     - description replaced with v2 description;
     - new per-person checklists created with Bitrix members.
+
+### Daily plan task participants (2026-05-04)
+
+- Daily plan tasks (`draft.meta.daily_plan=true`) get a separate participant list via `ACCOMPLICES`.
+- Regular meeting/day/week tasks still use the existing project defaults and are not affected.
+- Runtime env key:
+  - `BITRIX_DAILY_PLAN_ACCOMPLICE_IDS=51977,58194,127124,114736,137230,50760,123170,120601,426,162783,163323`
+- Current daily plan participant list:
+  - Иван Карповец / `51977`
+  - Анатолий Карповец / `58194`
+  - Михаил Конев / `127124`
+  - Артем Явдокименко / `114736`
+  - Виктор Шавловский / `137230`
+  - Эмиль Смолин / `50760`
+  - Николай Ладенко / `123170`
+  - Василий Точилин / `120601`
+  - Игорь Закорчемный / `426`
+  - Валентин Семенихин / `162783`
+  - Андрей Решетицкий / `163323`
