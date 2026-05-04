@@ -392,6 +392,10 @@ class TelegramBotFacade:
                 f"Действие в auto: {details.get('would_action_if_auto')}",
                 f"Заголовок: {result.title}",
             ]
+            if details.get("stale_binding_reset"):
+                lines.append(
+                    f"Старая привязка к задаче #{details.get('stale_binding_task_id')} сброшена: задача не найдена в CRM."
+                )
             if result.task_id:
                 lines.append(f"Целевая задача: #{result.task_id}")
             if result.task_url:
@@ -405,7 +409,10 @@ class TelegramBotFacade:
                 for item in checklists[:5]:
                     suffix = ""
                     if "would_add" in item:
-                        suffix = f", добавится {item.get('would_add')}, пропустится {item.get('would_skip')}"
+                        if item.get("dedupe_unavailable"):
+                            suffix = f", добавится до {item.get('would_add')}, дедупликация недоступна"
+                        else:
+                            suffix = f", добавится {item.get('would_add')}, пропустится {item.get('would_skip')}"
                     lines.append(f"- {item.get('title')}: {item.get('items_count')} пунктов{suffix}")
             matches = details.get("task_matches") or []
             if matches:

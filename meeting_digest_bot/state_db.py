@@ -218,6 +218,17 @@ class StateRepository:
             "meta": self._safe_json_load(row[7]),
         }
 
+    def delete_task_binding(self, *, source_type: str, source_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM crm_task_bindings
+                WHERE source_type = ? AND source_key = ?
+                """,
+                (source_type, source_key),
+            )
+            conn.commit()
+
     def save_weekly_rollup(
         self,
         *,

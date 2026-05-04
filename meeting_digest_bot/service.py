@@ -173,7 +173,20 @@ class MeetingDigestService:
         explicit_task_id: int | None,
     ) -> SyncResult:
         binding = self.state.get_task_binding(source_type=source_type, source_key=source_key)
-        target_task_id = explicit_task_id or (binding["bitrix_task_id"] if binding else None)
+        target_task_id = None if action == SyncAction.create else explicit_task_id or (binding["bitrix_task_id"] if binding else None)
+        stale_binding_task_id: int | None = None
+
+        if target_task_id and not self._task_exists(int(target_task_id)):
+            if explicit_task_id:
+                raise ValueError(
+                    f"Задача #{target_task_id} не найдена или недоступна в CRM. "
+                    "Если она была удалена, выполните команду без номера задачи с действием `создать`."
+                )
+            stale_binding_task_id = int(target_task_id)
+            self.state.delete_task_binding(source_type=source_type, source_key=source_key)
+            binding = None
+            target_task_id = None
+
         effective_action = self._resolve_action(action=action, has_existing=bool(target_task_id))
 
         if effective_action == SyncAction.preview:
@@ -182,6 +195,7 @@ class MeetingDigestService:
                 source_type=source_type,
                 source_key=source_key,
                 target_task_id=target_task_id,
+                stale_binding_task_id=stale_binding_task_id,
             )
 
         existing_required_actions = {
@@ -191,8 +205,14 @@ class MeetingDigestService:
             SyncAction.append_to_weekly,
         }
         if target_task_id is None and effective_action in existing_required_actions:
+            stale_suffix = (
+                f" Ранее была привязка к задаче #{stale_binding_task_id}, но она не найдена в CRM, поэтому привязка сброшена."
+                if stale_binding_task_id
+                else ""
+            )
             raise ValueError(
                 "Для этой команды нужна существующая задача. Укажите номер задачи или сначала выполните команду создать."
+                + stale_suffix
             )
 
         if effective_action == SyncAction.create:
@@ -513,6 +533,7 @@ class MeetingDigestService:
         source_type: str,
         source_key: str,
         target_task_id: int | None,
+        stale_binding_task_id: int | None = None,
     ) -> SyncResult:
         effective_if_auto = self._resolve_action(action=SyncAction.auto, has_existing=bool(target_task_id))
         checklist_summary: list[dict[str, Any]] = []
@@ -563,6 +584,9 @@ class MeetingDigestService:
         }
         if checklist_read_error:
             details["checklist_read_error"] = checklist_read_error
+        if stale_binding_task_id:
+            details["stale_binding_task_id"] = stale_binding_task_id
+            details["stale_binding_reset"] = True
         return SyncResult(
             action="preview",
             task_id=target_task_id,
@@ -575,6 +599,18 @@ class MeetingDigestService:
 
     def _task_url(self, task_id: int) -> str:
         return f"https://totiscrm.com/workgroups/group/{self.settings.bitrix_group_id}/tasks/task/view/{task_id}/"
+
+    def _task_exists(self, task_id: int) -> bool:
+        try:
+            data = self.bitrix.get_task(task_id, select=["ID", "TITLE"])
+        except Exception:
+            return False
+        result = data.get("result")
+        if isinstance(result, dict):
+            task = result.get("task") if isinstance(result.get("task"), dict) else result
+            task_id_value = task.get("id") or task.get("ID")
+            return bool(task_id_value)
+        return False
 
     def _find_task_matches(self, draft: TaskDraft) -> list[dict[str, Any]]:
         try:
