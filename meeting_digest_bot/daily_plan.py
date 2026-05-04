@@ -129,6 +129,8 @@ class DailyPlanParser:
         title = self._clean_item_text(item_text)
         if not title or self._is_noise_line(title):
             return
+        if not self._looks_like_task_item(title) or self._is_conversational_line(title):
+            return
         item = DailyPlanItem(
             title=title,
             person_name=current_person.full_name,
@@ -217,7 +219,7 @@ class DailyPlanParser:
 
     @staticmethod
     def _looks_like_task_item(text: str) -> bool:
-        return bool(text.strip()) and not text.strip().endswith("?")
+        return bool(text.strip()) and "?" not in text.strip()
 
     @staticmethod
     def _is_plan_marker(normalized_line: str) -> bool:
@@ -277,6 +279,27 @@ class DailyPlanParser:
                 "спасибо за просмотр",
                 "у мене поки все",
                 "у меня пока все",
+            )
+        )
+
+    def _is_conversational_line(self, text: str) -> bool:
+        normalized = PeopleDirectory.normalize_name(text)
+        if self._contains_person_prompt(normalized):
+            return True
+        if len(text) > 260:
+            return True
+        return normalized.startswith(
+            (
+                "ну ми тоді",
+                "ну мы тогда",
+                "давайте",
+                "зараз",
+                "сейчас",
+                "окей",
+                "добре",
+                "хорошо",
+                "так в принципі",
+                "так в принципе",
             )
         )
 
