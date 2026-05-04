@@ -516,14 +516,20 @@ class MeetingDigestService:
     ) -> SyncResult:
         effective_if_auto = self._resolve_action(action=SyncAction.auto, has_existing=bool(target_task_id))
         checklist_summary: list[dict[str, Any]] = []
-        existing_checklist_items = self.bitrix.list_checklist_items(target_task_id) if target_task_id else []
+        checklist_read_error = ""
+        existing_checklist_items: list[dict[str, Any]] = []
+        if target_task_id:
+            try:
+                existing_checklist_items = self.bitrix.list_checklist_items(target_task_id)
+            except Exception as exc:
+                checklist_read_error = str(exc)
         for group in draft.checklist_groups:
             group_summary: dict[str, Any] = {
                 "title": group.title,
                 "items_count": len(group.items),
                 "items_preview": [self._checklist_item_preview(item) for item in group.items[:5]],
             }
-            if target_task_id:
+            if target_task_id and not checklist_read_error:
                 dedupe = self.bitrix.preview_checklist_group_dedupe(
                     existing_checklist_items,
                     group.title,
@@ -536,7 +542,27 @@ class MeetingDigestService:
                         "existing_group_id": dedupe["parent_id"] or None,
                     }
                 )
+            elif target_task_id and checklist_read_error:
+                group_summary.update(
+                    {
+                        "would_add": len(group.items),
+                        "would_skip": None,
+                        "existing_group_id": None,
+                        "dedupe_unavailable": True,
+                    }
+                )
             checklist_summary.append(group_summary)
+        details: dict[str, Any] = {
+            "would_action_if_auto": effective_if_auto.value,
+            "description_chars": len(draft.description),
+            "comment_chars": len(draft.comment),
+            "checklists": checklist_summary,
+            "task_matches": self._find_task_matches(draft),
+            "tags": draft.tags,
+            "meta": draft.meta,
+        }
+        if checklist_read_error:
+            details["checklist_read_error"] = checklist_read_error
         return SyncResult(
             action="preview",
             task_id=target_task_id,
@@ -544,15 +570,7 @@ class MeetingDigestService:
             title=draft.title,
             source_type=source_type,
             source_key=source_key,
-            details={
-                "would_action_if_auto": effective_if_auto.value,
-                "description_chars": len(draft.description),
-                "comment_chars": len(draft.comment),
-                "checklists": checklist_summary,
-                "task_matches": self._find_task_matches(draft),
-                "tags": draft.tags,
-                "meta": draft.meta,
-            },
+            details=details,
         )
 
     def _task_url(self, task_id: int) -> str:
