@@ -756,3 +756,31 @@ Use these rules for any future LLM prompt that prepares text specifically for Bi
 - Current limitation:
   - parser is intentionally optimized for a structured daily format, not arbitrary conversation.
   - conversational address lines like `Ваня, ты проверял...?` are filtered out to avoid noisy checklist items.
+
+### Daily plan parser v2 update (2026-05-04)
+
+- Implemented `DailyPlanV2Parser`.
+- New priority for daily plan extraction:
+  - first use structured AIcallorder artifacts: `action_items`, `blockers`, `completed_today`, `summary`;
+  - use raw transcript parsing only as fallback when `action_items` are absent;
+  - do not create checklist items from raw conversational fragments when structured commitments exist.
+- Daily task description now has separate sections:
+  - date/team/source meetings;
+  - short summary;
+  - plan by people;
+  - global blockers/dependencies;
+  - done/confirmed on daily;
+  - manual review only for unassigned structured items.
+- Daily task checklists now include only plan commitments from `action_items`.
+- Blockers are rendered in the description, not as checklist items.
+- Added extra aliases in `people_directory.json`:
+  - `Іван`, `Ваня Карповець` -> Иван Карповец / `51977`;
+  - `Міша`, `Міша Адам` -> Михаил Конев / `127124`.
+- Real production validation:
+  - deployed to `/opt/meeting-digest-bot`;
+  - services restarted: `meeting-digest-bot-api.service`, `meeting-digest-bot-poller.service`;
+  - health check ok;
+  - task `168689` was repaired from daily 04.05:
+    - old noisy checklist items deleted;
+    - description replaced with v2 description;
+    - new per-person checklists created with Bitrix members.
