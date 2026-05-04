@@ -14,6 +14,7 @@ The service is intentionally separated from `AIcallorder`: `AIcallorder` records
 - Updates existing tasks in merge mode with `Point N` sections instead of destructive overwrites.
 - Supports manual Telegram commands in a group by replying to a digest post.
 - Can aggregate daily and weekly meeting results.
+- Provides a foundation for `#daily` planning with Bitrix checklist members.
 
 ## Current Production Defaults
 
@@ -55,6 +56,8 @@ More details: [Telegram Usage](docs/telegram-usage.md).
 - `обновить` / `update`: merges a meeting into the task description as a new `Point N`, creates a point-specific checklist, and adds a comment.
 
 More details: [Bitrix Publication Rules](docs/bitrix-publication.md).
+
+Daily planning design: [Daily Plan](docs/daily-plan.md).
 
 ## Local Development
 

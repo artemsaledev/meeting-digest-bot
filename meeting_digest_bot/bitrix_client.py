@@ -94,16 +94,25 @@ class BitrixClient:
         except Exception:
             return self.call("task.item.update", {"taskId": task_id, "fields": fields})
 
-    def add_checklist_item(self, task_id: int, title: str, parent_id: int = 0) -> int | None:
+    def add_checklist_item(
+        self,
+        task_id: int,
+        title: str,
+        parent_id: int = 0,
+        members: list[int] | None = None,
+    ) -> int | None:
+        fields: dict[str, Any] = {
+            "TITLE": title,
+            "PARENT_ID": parent_id,
+            "IS_COMPLETE": "N",
+        }
+        if members:
+            fields["MEMBERS"] = [int(member) for member in members]
         data = self.call(
             "task.checklistitem.add",
             {
                 "TASKID": task_id,
-                "FIELDS": {
-                    "TITLE": title,
-                    "PARENT_ID": parent_id,
-                    "IS_COMPLETE": "N",
-                },
+                "FIELDS": fields,
             },
         )
         result = data.get("result")
