@@ -76,13 +76,17 @@ For daily plan items:
 
 If the responsible person cannot be matched, the item should still be created, but the responsible should be included in the text as fallback.
 
-## Planned Commands
+## Implemented Commands
 
 ```text
-@LLMeets_bot план 2026-05-04
-@LLMeets_bot хвосты 2026-05-04
-@LLMeets_bot отчет недели 2026-04-27 2026-05-03
+@LLMeets_bot план 2026-05-04 preview
+@LLMeets_bot план 2026-05-04 создать
+@LLMeets_bot план 2026-05-04 создать команда Bitrix Develop Team
+python -m meeting_digest_bot sync-daily-plan --report-date 2026-05-04 --action preview
 ```
+
+The command creates or previews a Bitrix task named `План дня DD.MM.YYYY / <team>`.
+Only meetings tagged as `#daily` are included in the daily plan source set.
 
 ## Weekly Report
 
@@ -93,4 +97,3 @@ Weekly report should query daily plan tasks for a date range and summarize:
 - incomplete items still open next morning
 - responsible person for each incomplete item
 - recurring blockers
-

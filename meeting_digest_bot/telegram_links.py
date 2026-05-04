@@ -36,7 +36,7 @@ def extract_task_id(text: str) -> int | None:
     match = TASK_URL_PATTERN.search(text)
     if match:
         return int(match.group("task_id"))
-    plain = re.search(r"(?:^|\s)(\d{3,})(?:\s|$)", text)
+    plain = re.search(r"(?<![-/\d])\b(\d{3,})\b(?![-/\d])", text)
     if plain:
         return int(plain.group(1))
     return None

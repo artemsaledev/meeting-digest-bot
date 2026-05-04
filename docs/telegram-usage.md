@@ -103,9 +103,12 @@ If needed, the post URL can be sent directly:
 ## Daily And Weekly Commands
 
 ```text
+@LLMeets_bot план 2026-05-04 preview
+@LLMeets_bot план 2026-05-04 создать
+@LLMeets_bot план 2026-05-04 создать команда Bitrix Develop Team
 /day@LLMeets_bot 2026-05-01 week 166229
 /week@LLMeets_bot 2026-04-27 2026-05-03
 ```
 
 Daily-to-weekly mode appends daily commitments to a weekly task.
-
+Daily plan mode uses only Loom meetings marked with `#daily`, parses people blocks, and adds Bitrix checklist `MEMBERS` for recognized responsible users.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Header, HTTPException
 
 from .config import Settings
-from .models import DaySyncRequest, PostSyncRequest, PublicationRegistrationRequest, WeekSyncRequest
+from .models import DailyPlanSyncRequest, DaySyncRequest, PostSyncRequest, PublicationRegistrationRequest, WeekSyncRequest
 from .service import MeetingDigestService
 from .telegram_bot import TelegramBotFacade
 
@@ -50,6 +50,12 @@ def sync_week(payload: WeekSyncRequest) -> dict:
 @app.post("/sync/day")
 def sync_day(payload: DaySyncRequest) -> dict:
     result = service.sync_day(payload)
+    return {"ok": True, "result": result.model_dump()}
+
+
+@app.post("/sync/daily-plan")
+def sync_daily_plan(payload: DailyPlanSyncRequest) -> dict:
+    result = service.sync_daily_plan(payload)
     return {"ok": True, "result": result.model_dump()}
 
 

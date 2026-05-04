@@ -5,7 +5,7 @@ import json
 from datetime import date
 
 from .config import Settings
-from .models import PostSyncRequest, PublicationRegistrationRequest, SyncAction, WeekSyncRequest
+from .models import DailyPlanSyncRequest, PostSyncRequest, PublicationRegistrationRequest, SyncAction, WeekSyncRequest
 from .service import MeetingDigestService
 from .telegram_bot import TelegramBotFacade
 from .telegram_poller import TelegramPollingWorker
@@ -45,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     sync_day.add_argument("--report-date", required=True)
     sync_day.add_argument("--action", choices=[item.value for item in SyncAction], default="auto")
     sync_day.add_argument("--task-id", type=int)
+
+    sync_daily_plan = subparsers.add_parser("sync-daily-plan")
+    sync_daily_plan.add_argument("--report-date", required=True)
+    sync_daily_plan.add_argument("--action", choices=[item.value for item in SyncAction], default="preview")
+    sync_daily_plan.add_argument("--task-id", type=int)
+    sync_daily_plan.add_argument("--team-name", default="Bitrix Develop Team")
 
     poll = subparsers.add_parser("poll-telegram")
     poll.add_argument("--once", action="store_true")
@@ -113,6 +119,18 @@ def main(argv: list[str] | None = None) -> int:
                 report_date=date.fromisoformat(args.report_date),
                 action=SyncAction(args.action),
                 task_id=args.task_id,
+            )
+        )
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "sync-daily-plan":
+        result = service.sync_daily_plan(
+            DailyPlanSyncRequest(
+                report_date=date.fromisoformat(args.report_date),
+                action=SyncAction(args.action),
+                task_id=args.task_id,
+                team_name=args.team_name,
             )
         )
         print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))

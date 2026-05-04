@@ -127,13 +127,19 @@ class BitrixClient:
         result = data.get("result") or []
         return list(result) if isinstance(result, list) else []
 
-    def add_checklist_group(self, task_id: int, title: str, items: list[str]) -> None:
+    def add_checklist_group(self, task_id: int, title: str, items: list[Any]) -> None:
         parent_id = self.add_checklist_item(task_id, title, parent_id=0)
         for item in items:
-            if item.strip():
-                self.add_checklist_item(task_id, item.strip(), parent_id=parent_id or 0)
+            item_title = self._checklist_item_title(item)
+            if item_title:
+                self.add_checklist_item(
+                    task_id,
+                    item_title,
+                    parent_id=parent_id or 0,
+                    members=self._checklist_item_members(item),
+                )
 
-    def add_checklist_group_deduped(self, task_id: int, title: str, items: list[str]) -> dict[str, Any]:
+    def add_checklist_group_deduped(self, task_id: int, title: str, items: list[Any]) -> dict[str, Any]:
         existing = self.list_checklist_items(task_id)
         diff = self.preview_checklist_group_dedupe(existing, title, items)
         parent_id = int(diff.get("parent_id") or 0)
@@ -146,14 +152,19 @@ class BitrixClient:
         added = 0
         skipped = 0
         for item in items:
-            text = item.strip()
+            text = self._checklist_item_title(item)
             if not text:
                 continue
             normalized = self._normalize_checklist_text(text)
             if normalized in existing_item_titles:
                 skipped += 1
                 continue
-            self.add_checklist_item(task_id, text, parent_id=parent_id)
+            self.add_checklist_item(
+                task_id,
+                text,
+                parent_id=parent_id,
+                members=self._checklist_item_members(item),
+            )
             existing_item_titles.add(normalized)
             added += 1
 
@@ -168,7 +179,7 @@ class BitrixClient:
         self,
         existing: list[dict[str, Any]],
         title: str,
-        items: list[str],
+        items: list[Any],
     ) -> dict[str, Any]:
         normalized_title = self._normalize_checklist_text(title)
         parent_id = 0
@@ -190,7 +201,7 @@ class BitrixClient:
         would_skip = 0
         seen = set(existing_item_titles)
         for item in items:
-            text = item.strip()
+            text = self._checklist_item_title(item)
             if not text:
                 continue
             normalized = self._normalize_checklist_text(text)
@@ -242,3 +253,29 @@ class BitrixClient:
     @staticmethod
     def _normalize_checklist_text(value: str) -> str:
         return " ".join(value.strip().casefold().split())
+
+    @staticmethod
+    def _checklist_item_title(item: Any) -> str:
+        if isinstance(item, str):
+            return item.strip()
+        if isinstance(item, dict):
+            return str(item.get("title") or item.get("TITLE") or "").strip()
+        title = getattr(item, "title", "")
+        return str(title or "").strip()
+
+    @staticmethod
+    def _checklist_item_members(item: Any) -> list[int]:
+        if isinstance(item, str):
+            return []
+        raw_members: Any
+        if isinstance(item, dict):
+            raw_members = item.get("members") or item.get("MEMBERS") or []
+        else:
+            raw_members = getattr(item, "members", [])
+        result: list[int] = []
+        for member in raw_members or []:
+            try:
+                result.append(int(member))
+            except (TypeError, ValueError):
+                continue
+        return result

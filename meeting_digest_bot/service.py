@@ -7,8 +7,10 @@ from typing import Any
 from .aicallorder_db import AIcallorderRepository
 from .bitrix_client import BitrixClient
 from .config import Settings
+from .daily_plan import DailyPlanParser
 from .models import (
     DailyRollup,
+    DailyPlanSyncRequest,
     DaySyncRequest,
     DigestType,
     PostSyncRequest,
@@ -20,7 +22,7 @@ from .models import (
     WeeklyRollup,
 )
 from .state_db import StateRepository
-from .task_drafts import build_daily_task_draft, build_meeting_task_draft, build_weekly_task_draft
+from .task_drafts import build_daily_plan_task_draft, build_daily_task_draft, build_meeting_task_draft, build_weekly_task_draft
 from .task_matching import find_task_matches
 from .weekly_llm import WeeklyLLMConfig, WeeklyRollupLLM
 
@@ -44,6 +46,7 @@ class MeetingDigestService:
                 timeout_seconds=settings.llm_timeout_seconds,
             )
         )
+        self.daily_plan_parser = DailyPlanParser()
 
     def register_publication(self, payload: PublicationRegistrationRequest):
         return self.state.register_publication(payload)
@@ -128,6 +131,30 @@ class MeetingDigestService:
         draft = build_daily_task_draft(rollup=rollup, default_tags=self.settings.bitrix_tags)
         source_type = "daily_digest"
         source_key = payload.report_date.isoformat()
+        return self._apply_task_draft(
+            draft=draft,
+            source_type=source_type,
+            source_key=source_key,
+            action=payload.action,
+            explicit_task_id=payload.task_id,
+        )
+
+    def sync_daily_plan(self, payload: DailyPlanSyncRequest) -> SyncResult:
+        meetings = [
+            meeting
+            for meeting in self.aicallorder.list_meetings_between(payload.report_date, payload.report_date)
+            if self._is_daily_plan_meeting(meeting)
+        ]
+        if not meetings:
+            raise ValueError(f"За {payload.report_date.isoformat()} не найдены встречи с #daily.")
+        plan = self.daily_plan_parser.parse_meetings(
+            report_date=payload.report_date,
+            meetings=meetings,
+            team_name=payload.team_name,
+        )
+        draft = build_daily_plan_task_draft(plan=plan, default_tags=self.settings.bitrix_tags)
+        source_type = "daily_plan"
+        source_key = f"{payload.report_date.isoformat()}:{payload.team_name}"
         return self._apply_task_draft(
             draft=draft,
             source_type=source_type,
@@ -469,7 +496,7 @@ class MeetingDigestService:
         result: list[str] = []
         for group in draft.checklist_groups:
             for item in group.items:
-                text = str(item).strip()
+                text = self._checklist_item_title(item)
                 if text:
                     result.append(f"{group.title}: {text}")
         return result
@@ -494,7 +521,7 @@ class MeetingDigestService:
             group_summary: dict[str, Any] = {
                 "title": group.title,
                 "items_count": len(group.items),
-                "items_preview": group.items[:5],
+                "items_preview": [self._checklist_item_preview(item) for item in group.items[:5]],
             }
             if target_task_id:
                 dedupe = self.bitrix.preview_checklist_group_dedupe(
@@ -631,6 +658,35 @@ class MeetingDigestService:
             tech_debt=tech_debt,
             business_requests=business_requests,
         )
+
+    @staticmethod
+    def _is_daily_plan_meeting(meeting) -> bool:
+        title = str(getattr(meeting, "title", "") or "").casefold()
+        meeting_type = str(getattr(meeting, "meeting_type", "") or "").casefold()
+        artifacts = getattr(meeting, "artifacts", {}) or {}
+        tags = artifacts.get("tags") or artifacts.get("hashtags") or []
+        tag_text = " ".join(str(tag).casefold() for tag in tags) if isinstance(tags, list) else str(tags).casefold()
+        return "#daily" in title or meeting_type == "daily" or "#daily" in tag_text or " daily " in f" {tag_text} "
+
+    @staticmethod
+    def _checklist_item_title(item: Any) -> str:
+        if isinstance(item, str):
+            return item.strip()
+        if isinstance(item, dict):
+            return str(item.get("title") or item.get("TITLE") or "").strip()
+        return str(getattr(item, "title", "") or "").strip()
+
+    @staticmethod
+    def _checklist_item_preview(item: Any) -> dict[str, Any] | str:
+        title = MeetingDigestService._checklist_item_title(item)
+        members = []
+        if isinstance(item, dict):
+            members = item.get("members") or item.get("MEMBERS") or []
+        elif not isinstance(item, str):
+            members = getattr(item, "members", []) or []
+        if members:
+            return {"title": title, "members": list(members)}
+        return title
 
     @staticmethod
     def _extract_action_titles(value: object) -> list[str]:

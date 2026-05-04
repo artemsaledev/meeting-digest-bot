@@ -7,6 +7,7 @@ import re
 import requests
 
 from .models import (
+    DailyPlanSyncRequest,
     DigestType,
     DaySyncRequest,
     PostSyncRequest,
@@ -22,6 +23,10 @@ from .telegram_links import extract_post_link, extract_task_id
 
 BOT_MENTION_RE = re.compile(r"@LLMeets_bot\b", re.IGNORECASE)
 DAY_COMMAND_RE = re.compile(r"/day(?:@[A-Za-z0-9_]+)?\s+(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
+PLAN_COMMAND_RE = re.compile(
+    r"(?:/plan(?:@[A-Za-z0-9_]+)?|план|daily[-_\s]?plan)\s+(\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
 WEEK_COMMAND_RE = re.compile(
     r"/week(?:@[A-Za-z0-9_]+)?\s+(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})",
     re.IGNORECASE,
@@ -64,7 +69,21 @@ class TelegramBotFacade:
 
         command = self._parse_command(text, message=message)
         action = SyncAction.preview if command.action == SyncAction.auto else command.action
-        if command.report_date:
+        if command.daily_plan_date:
+            result = self.service.sync_daily_plan(
+                DailyPlanSyncRequest(
+                    report_date=command.daily_plan_date,
+                    action=action,
+                    task_id=command.task_id,
+                    team_name=command.team_name or "Bitrix Develop Team",
+                )
+            )
+            response = TelegramResponse(
+                ok=True,
+                text=self._format_sync_result("плана дня", result),
+                payload=result.model_dump(),
+            )
+        elif command.report_date:
             result = self.service.sync_day(
                 DaySyncRequest(
                     report_date=command.report_date,
@@ -128,7 +147,8 @@ class TelegramBotFacade:
         return response.json()
 
     def _parse_command(self, text: str, message: dict | None = None) -> TelegramCommand:
-        lowered = self._strip_bot_mention(text).lower()
+        command_text = self._strip_bot_mention(text)
+        lowered = command_text.lower()
         action = SyncAction.auto
         normalized = f" {lowered} "
         if any(marker in normalized for marker in [" preview ", " предпросмотр ", " показать ", " проверить "]):
@@ -148,15 +168,18 @@ class TelegramBotFacade:
         reply_text_post_link = self._post_link_from_reply_text(message) if not post_link else None
         reply_post_url = self._post_url_from_reply(message) if not post_link and not reply_text_post_link else None
         task_id = extract_task_id(lowered)
+        plan_match = PLAN_COMMAND_RE.search(lowered)
         day_match = DAY_COMMAND_RE.search(lowered)
         week_match = WEEK_COMMAND_RE.search(lowered)
         return TelegramCommand(
             post_url=post_link.raw_url if post_link else reply_text_post_link or reply_post_url,
             task_id=task_id,
             action=action,
+            daily_plan_date=date.fromisoformat(plan_match.group(1)) if plan_match else None,
             report_date=date.fromisoformat(day_match.group(1)) if day_match else None,
             week_from=date.fromisoformat(week_match.group(1)) if week_match else None,
             week_to=date.fromisoformat(week_match.group(2)) if week_match else None,
+            team_name=self._extract_team_name(command_text),
         )
 
     def _register_publication_from_reply(self, message: dict) -> TelegramResponse:
@@ -353,6 +376,8 @@ class TelegramBotFacade:
             "@LLMeets_bot https://t.me/c/5147878786/120 чеклист 168334\n"
             "@LLMeets_bot https://t.me/c/5147878786/120 обновить 168334\n"
             "Ответом на старый пост: @LLMeets_bot зарегистрировать\n"
+            "@LLMeets_bot план 2026-05-04 preview\n"
+            "@LLMeets_bot план 2026-05-04 создать\n"
             "/day@LLMeets_bot 2026-04-14 week 168336\n"
             "/week@LLMeets_bot 2026-04-27 2026-05-03\n\n"
             "Если задача уже привязана к этой встрече, режим auto добавит комментарий в существующую задачу."
@@ -410,3 +435,12 @@ class TelegramBotFacade:
                 )
             return "\n".join(lines)
         return f"Синхронизация {scope} выполнена: {result.action}. Задача #{result.task_id}\n{result.task_url}"
+
+    @staticmethod
+    def _extract_team_name(text: str) -> str | None:
+        match = re.search(r"(?:команда|team)\s+(.+)$", text, flags=re.IGNORECASE)
+        if not match:
+            return None
+        team = match.group(1).strip()
+        team = re.sub(r"\b(?:preview|создать|create|обновить|update|коммент|comment|чеклист|checklist)\b", "", team, flags=re.IGNORECASE).strip()
+        return team or None

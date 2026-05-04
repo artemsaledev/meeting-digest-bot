@@ -58,9 +58,22 @@ class DaySyncRequest(BaseModel):
     task_id: int | None = None
 
 
+class DailyPlanSyncRequest(BaseModel):
+    report_date: date
+    action: SyncAction = SyncAction.auto
+    task_id: int | None = None
+    team_name: str = "Bitrix Develop Team"
+
+
+class ChecklistItem(BaseModel):
+    title: str
+    members: list[int] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChecklistGroup(BaseModel):
     title: str
-    items: list[str] = Field(default_factory=list)
+    items: list[str | ChecklistItem] = Field(default_factory=list)
 
 
 class TaskDraft(BaseModel):
@@ -131,13 +144,39 @@ class DailyRollup(BaseModel):
     business_requests: list[str] = Field(default_factory=list)
 
 
+class DailyPlanItem(BaseModel):
+    title: str
+    person_name: str
+    bitrix_user_id: int | None = None
+    source_meeting_id: str | None = None
+    source_meeting_title: str | None = None
+    item_type: str = "plan"
+
+
+class DailyPersonPlan(BaseModel):
+    person_name: str
+    bitrix_user_id: int | None = None
+    plan_items: list[DailyPlanItem] = Field(default_factory=list)
+    blockers: list[DailyPlanItem] = Field(default_factory=list)
+
+
+class DailyPlan(BaseModel):
+    report_date: date
+    team_name: str = "Bitrix Develop Team"
+    source_meeting_ids: list[str] = Field(default_factory=list)
+    people: list[DailyPersonPlan] = Field(default_factory=list)
+    unmatched_items: list[str] = Field(default_factory=list)
+
+
 class TelegramCommand(BaseModel):
     post_url: str | None = None
     task_id: int | None = None
     action: SyncAction = SyncAction.auto
     report_date: date | None = None
+    daily_plan_date: date | None = None
     week_from: date | None = None
     week_to: date | None = None
+    team_name: str | None = None
 
 
 class TelegramResponse(BaseModel):

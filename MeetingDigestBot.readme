@@ -727,3 +727,32 @@ Use these rules for any future LLM prompt that prepares text specifically for Bi
   - Portal manifest for `task.checklistitem.add` exposes writable fields only for `PARENT_ID`, `TITLE`, `SORT_INDEX`, `IS_COMPLETE`, `IS_IMPORTANT`, `MEMBERS`.
   - `CREATED_BY` is readable/sortable but not writable, so checklist item author is the REST caller/webhook user.
   - To make checklist items visually authored by user `114736`, the Bitrix webhook/token itself must be issued under user `114736`.
+
+### Daily plan parser update (2026-05-04)
+
+- Added a separate `#daily` plan parser for daily team planning meetings.
+- Source meetings are included only when:
+  - title contains `#daily`
+  - or `meeting_type=daily`
+  - or processed artifacts contain `#daily` in tags/hashtags.
+- Recommended spoken format:
+  - say the full person name as a separate line
+  - then say `План на сегодня`, `Блокеры`, optionally `Сделано вчера`
+  - then list short actionable points.
+- The parser uses `meeting_digest_bot/people_directory.json` to map spoken names and aliases to Bitrix user IDs.
+- Daily plan checklist groups are created per person.
+- Each checklist item can include Bitrix checklist `MEMBERS`, so the responsible user is attached directly to the item.
+- Telegram command:
+  - `@LLMeets_bot план 2026-05-04 preview`
+  - `@LLMeets_bot план 2026-05-04 создать`
+  - `@LLMeets_bot план 2026-05-04 создать команда Bitrix Develop Team`
+- CLI command:
+  - `python -m meeting_digest_bot sync-daily-plan --report-date 2026-05-04 --action preview`
+- API endpoint:
+  - `POST /sync/daily-plan`
+- Source binding:
+  - `source_type=daily_plan`
+  - `source_key=<YYYY-MM-DD>:<team_name>`
+- Current limitation:
+  - parser is intentionally optimized for a structured daily format, not arbitrary conversation.
+  - conversational address lines like `Ваня, ты проверял...?` are filtered out to avoid noisy checklist items.

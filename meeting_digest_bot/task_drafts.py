@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from .models import ChecklistGroup, DailyRollup, MeetingRecord, PublicationRecord, TaskDraft, WeeklyRollup
+from typing import Any
+
+from .models import ChecklistGroup, ChecklistItem, DailyPlan, DailyRollup, MeetingRecord, PublicationRecord, TaskDraft, WeeklyRollup
 
 
 CRM_COMMENT_FORMAT_RULES = """
@@ -155,6 +157,96 @@ def build_daily_task_draft(
         ],
         tags=list(default_tags or []),
         meta={"report_date": rollup.report_date.isoformat()},
+    )
+
+
+def build_daily_plan_task_draft(
+    *,
+    plan: DailyPlan,
+    default_tags: list[str] | None = None,
+) -> TaskDraft:
+    title = f"План дня {plan.report_date.strftime('%d.%m.%Y')} / {plan.team_name}"
+    description_parts = [
+        f"Дата: {plan.report_date.isoformat()}",
+        f"Команда: {plan.team_name}",
+    ]
+    if plan.source_meeting_ids:
+        description_parts.extend(["", "Источник #daily встреч", *_to_bullets(plan.source_meeting_ids)])
+
+    if plan.people:
+        description_parts.extend(["", "План по людям"])
+        for person_plan in plan.people:
+            description_parts.append(f"{person_plan.person_name} ({person_plan.bitrix_user_id or 'без Bitrix ID'})")
+            if person_plan.plan_items:
+                description_parts.extend(_to_bullets([item.title for item in person_plan.plan_items]))
+            if person_plan.blockers:
+                description_parts.append("Блокеры:")
+                description_parts.extend(_to_bullets([item.title for item in person_plan.blockers]))
+
+    if plan.unmatched_items:
+        description_parts.extend(["", "Не удалось назначить ответственного", *_to_bullets(plan.unmatched_items)])
+
+    checklist_groups: list[ChecklistGroup] = []
+    for person_plan in plan.people:
+        items: list[ChecklistItem] = []
+        for item in person_plan.plan_items:
+            members = [item.bitrix_user_id] if item.bitrix_user_id else []
+            items.append(
+                ChecklistItem(
+                    title=item.title,
+                    members=members,
+                    meta={
+                        "person_name": item.person_name,
+                        "item_type": item.item_type,
+                        "source_meeting_id": item.source_meeting_id,
+                    },
+                )
+            )
+        if person_plan.blockers:
+            for item in person_plan.blockers:
+                members = [item.bitrix_user_id] if item.bitrix_user_id else []
+                items.append(
+                    ChecklistItem(
+                        title=f"Блокер: {item.title}",
+                        members=members,
+                        meta={
+                            "person_name": item.person_name,
+                            "item_type": item.item_type,
+                            "source_meeting_id": item.source_meeting_id,
+                        },
+                    )
+                )
+        if items:
+            checklist_groups.append(ChecklistGroup(title=person_plan.person_name, items=items))
+
+    if plan.unmatched_items:
+        checklist_groups.append(
+            ChecklistGroup(
+                title="Не назначено",
+                items=[ChecklistItem(title=item, members=[]) for item in plan.unmatched_items],
+            )
+        )
+
+    comment_lines = [
+        f"План дня сформирован из #daily встреч за {plan.report_date.strftime('%d.%m.%Y')}.",
+        f"Команда: {plan.team_name}",
+        f"Ответственных найдено: {len(plan.people)}",
+    ]
+    if plan.unmatched_items:
+        comment_lines.append(f"Без ответственного: {len(plan.unmatched_items)}")
+
+    return TaskDraft(
+        title=title,
+        description="\n".join(description_parts).strip(),
+        comment="\n".join(comment_lines).strip(),
+        checklist_groups=checklist_groups,
+        tags=list(default_tags or []) + ["daily-plan"],
+        meta={
+            "report_date": plan.report_date.isoformat(),
+            "team_name": plan.team_name,
+            "source_meeting_ids": plan.source_meeting_ids,
+            "daily_plan": True,
+        },
     )
 
 
@@ -381,10 +473,18 @@ def _truncate_comment(text: str, limit: int = 8000) -> str:
     return text[: limit - 80].rstrip() + "\n\n...Комментарий сокращен, полный текст доступен в Google Doc/Transcript Doc."
 
 
-def _to_bullets(values: list[str]) -> list[str]:
+def _checklist_text(value: Any) -> str:
+    if isinstance(value, ChecklistItem):
+        return value.title.strip()
+    if isinstance(value, dict):
+        return str(value.get("title") or value.get("TITLE") or "").strip()
+    return _plain_text_for_crm(value)
+
+
+def _to_bullets(values: list[Any]) -> list[str]:
     result: list[str] = []
     for item in values:
-        item_lines = _plain_text_for_crm(item).splitlines()
+        item_lines = _checklist_text(item).splitlines()
         if not item_lines:
             continue
         result.append(f"- {item_lines[0]}")
