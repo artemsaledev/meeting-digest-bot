@@ -164,6 +164,11 @@ class DailyPlan(BaseModel):
     report_date: date
     team_name: str = "Bitrix Develop Team"
     source_meeting_ids: list[str] = Field(default_factory=list)
+    summary: str = ""
+    global_blockers: list[str] = Field(default_factory=list)
+    completed_items: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    review_notes: list[str] = Field(default_factory=list)
     people: list[DailyPersonPlan] = Field(default_factory=list)
     unmatched_items: list[str] = Field(default_factory=list)
 

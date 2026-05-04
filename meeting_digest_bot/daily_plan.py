@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from datetime import date
 import re
+from typing import Any
 
 from .models import DailyPersonPlan, DailyPlan, DailyPlanItem, MeetingRecord
 from .people import PeopleDirectory, Person
@@ -447,6 +448,257 @@ class DailyPlanParser:
         seen: set[str] = set()
         for item in items:
             key = PeopleDirectory.normalize_name(item.title)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
+
+
+class DailyPlanV2Parser:
+    """Build daily plans from structured Loom artifacts first, transcript second.
+
+    The first implementation parsed raw speech directly. That is useful as a
+    fallback, but it turns pauses, questions, and "I finished this on Friday"
+    into checklists too easily. V2 treats the already processed AIcallorder
+    digest as the source of truth for commitments and keeps transcript parsing
+    only for posts where action_items were not produced.
+    """
+
+    DONE_STATUS_MARKERS = {
+        "done",
+        "closed",
+        "completed",
+        "готово",
+        "выполнено",
+        "виконано",
+        "завершено",
+        "закрыто",
+        "закрито",
+    }
+    META_COMMITMENT_MARKERS = {
+        "формат по дейлі",
+        "формат по daily",
+        "просто пропоную",
+        "буду протанно обробляти",
+        "послідовно йти по людям",
+        "последовательно идти по людям",
+        "давайте порядок",
+        "можемо розбігатися",
+    }
+
+    def __init__(self, people: PeopleDirectory | None = None, fallback: DailyPlanParser | None = None) -> None:
+        self.people = people or PeopleDirectory.from_file()
+        self.fallback = fallback or DailyPlanParser(self.people)
+
+    def parse_meetings(
+        self,
+        *,
+        report_date: date,
+        meetings: list[MeetingRecord],
+        team_name: str = "Bitrix Develop Team",
+    ) -> DailyPlan:
+        people: "OrderedDict[int | str, DailyPersonPlan]" = OrderedDict()
+        unmatched_items: list[str] = []
+        source_meeting_ids: list[str] = []
+        summaries: list[str] = []
+        global_blockers: list[str] = []
+        completed_items: list[str] = []
+        decisions: list[str] = []
+        review_notes: list[str] = []
+
+        for meeting in meetings:
+            source_meeting_ids.append(meeting.loom_video_id)
+            artifacts = meeting.artifacts or {}
+            summary = self._as_text(artifacts.get("summary"))
+            if summary:
+                summaries.append(f"{meeting.title}: {summary}")
+
+            meeting_decisions = self._clean_list(artifacts.get("decisions"))
+            decisions.extend(self._unique_missing(decisions, meeting_decisions))
+            meeting_blockers = self._clean_list(artifacts.get("blockers"))
+            global_blockers.extend(self._unique_missing(global_blockers, meeting_blockers))
+            meeting_completed = self._clean_list(artifacts.get("completed_today"))
+            completed_items.extend(self._unique_missing(completed_items, meeting_completed))
+
+            action_items = artifacts.get("action_items")
+            if isinstance(action_items, list) and action_items:
+                self._append_artifact_actions(
+                    people=people,
+                    unmatched_items=unmatched_items,
+                    completed_items=completed_items,
+                    meeting=meeting,
+                    values=action_items,
+                )
+                continue
+
+            fallback_plan = self.fallback.parse_meetings(
+                report_date=report_date,
+                meetings=[meeting],
+                team_name=team_name,
+            )
+            self._merge_people(people, fallback_plan.people)
+            unmatched_items.extend(self._unique_missing(unmatched_items, fallback_plan.unmatched_items))
+            review_notes.append(
+                f"{meeting.title}: action_items не найдены, использован fallback-разбор транскрипта."
+            )
+
+        for person_plan in people.values():
+            person_plan.plan_items = DailyPlanParser._dedupe_items(person_plan.plan_items)
+            person_plan.blockers = DailyPlanParser._dedupe_items(person_plan.blockers)
+
+        return DailyPlan(
+            report_date=report_date,
+            team_name=team_name,
+            source_meeting_ids=source_meeting_ids,
+            summary="\n".join(summaries[:5]).strip(),
+            global_blockers=global_blockers,
+            completed_items=completed_items,
+            decisions=decisions,
+            review_notes=review_notes,
+            people=[plan for plan in people.values() if plan.plan_items or plan.blockers],
+            unmatched_items=unmatched_items,
+        )
+
+    def _append_artifact_actions(
+        self,
+        *,
+        people: "OrderedDict[int | str, DailyPersonPlan]",
+        unmatched_items: list[str],
+        completed_items: list[str],
+        meeting: MeetingRecord,
+        values: list[Any],
+    ) -> None:
+        for value in values:
+            title = self._action_title(value)
+            if not title:
+                continue
+            status = self._action_status(value)
+            owner = self._action_owner(value)
+            person = self._resolve_owner(owner=owner, title=title)
+            cleaned_title = self._clean_commitment_title(title)
+
+            if not cleaned_title or self._is_meta_commitment(cleaned_title):
+                continue
+            if self._is_done_status(status):
+                completed_items.extend(self._unique_missing(completed_items, [cleaned_title]))
+                continue
+            if not person:
+                label = cleaned_title if not owner else f"{cleaned_title} | owner={owner}"
+                unmatched_items.extend(self._unique_missing(unmatched_items, [label]))
+                continue
+
+            key: int | str = person.bitrix_user_id or person.full_name
+            if key not in people:
+                people[key] = DailyPersonPlan(
+                    person_name=person.full_name,
+                    bitrix_user_id=person.bitrix_user_id,
+                )
+            people[key].plan_items.append(
+                DailyPlanItem(
+                    title=cleaned_title,
+                    person_name=person.full_name,
+                    bitrix_user_id=person.bitrix_user_id,
+                    source_meeting_id=meeting.loom_video_id,
+                    source_meeting_title=meeting.title,
+                    item_type=PLAN_SECTION,
+                )
+            )
+
+    def _resolve_owner(self, *, owner: str, title: str) -> Person | None:
+        person = self.people.find(owner)
+        if person:
+            return person
+        normalized_owner = PeopleDirectory.normalize_name(owner)
+        if "миша" in normalized_owner or "міша" in normalized_owner:
+            return self.people.find("Миша")
+        if "ваня" in normalized_owner:
+            return self.people.find("Ваня")
+        if normalized_owner in {"саша", "саша у відпустці", "саша в отпуске"}:
+            return None
+
+        # Sometimes owner is omitted, but the action title starts with a name.
+        for person_candidate in self.people.people:
+            aliases = (person_candidate.full_name, *person_candidate.aliases)
+            if any(PeopleDirectory.normalize_name(title).startswith(PeopleDirectory.normalize_name(alias) + " ") for alias in aliases):
+                return person_candidate
+        return None
+
+    @staticmethod
+    def _action_title(value: Any) -> str:
+        if isinstance(value, dict):
+            return DailyPlanV2Parser._as_text(value.get("title") or value.get("name") or "")
+        return DailyPlanV2Parser._as_text(value)
+
+    @staticmethod
+    def _action_owner(value: Any) -> str:
+        if not isinstance(value, dict):
+            return ""
+        return DailyPlanV2Parser._as_text(value.get("owner") or value.get("responsible") or "")
+
+    @staticmethod
+    def _action_status(value: Any) -> str:
+        if not isinstance(value, dict):
+            return ""
+        return DailyPlanV2Parser._as_text(value.get("status") or "")
+
+    @classmethod
+    def _clean_commitment_title(cls, title: str) -> str:
+        cleaned = cls._as_text(title)
+        cleaned = re.sub(r"\s*\|\s*(?:owner|due|due_date|status)\s*=.*$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", cleaned).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.strip(" .;")
+
+    @classmethod
+    def _is_done_status(cls, status: str) -> bool:
+        normalized = PeopleDirectory.normalize_name(status)
+        return any(marker in normalized for marker in cls.DONE_STATUS_MARKERS)
+
+    @classmethod
+    def _is_meta_commitment(cls, title: str) -> bool:
+        normalized = PeopleDirectory.normalize_name(title)
+        if "?" in title:
+            return True
+        return any(marker in normalized for marker in cls.META_COMMITMENT_MARKERS)
+
+    @staticmethod
+    def _clean_list(values: object) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        result: list[str] = []
+        for value in values:
+            text = DailyPlanV2Parser._as_text(value.get("title") if isinstance(value, dict) else value)
+            if text:
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _as_text(value: object) -> str:
+        text = str(value or "").replace("\u00a0", " ").strip()
+        if not text:
+            return ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _merge_people(target: "OrderedDict[int | str, DailyPersonPlan]", source: list[DailyPersonPlan]) -> None:
+        for parsed in source:
+            key: int | str = parsed.bitrix_user_id or parsed.person_name
+            if key not in target:
+                target[key] = DailyPersonPlan(
+                    person_name=parsed.person_name,
+                    bitrix_user_id=parsed.bitrix_user_id,
+                )
+            target[key].plan_items.extend(parsed.plan_items)
+            target[key].blockers.extend(parsed.blockers)
+
+    @staticmethod
+    def _unique_missing(existing: list[str], candidates: list[str]) -> list[str]:
+        seen = {PeopleDirectory.normalize_name(item) for item in existing}
+        result: list[str] = []
+        for item in candidates:
+            key = PeopleDirectory.normalize_name(item)
             if not key or key in seen:
                 continue
             seen.add(key)

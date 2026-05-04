@@ -7,7 +7,7 @@ from typing import Any
 from .aicallorder_db import AIcallorderRepository
 from .bitrix_client import BitrixClient
 from .config import Settings
-from .daily_plan import DailyPlanParser
+from .daily_plan import DailyPlanV2Parser
 from .models import (
     DailyRollup,
     DailyPlanSyncRequest,
@@ -46,7 +46,7 @@ class MeetingDigestService:
                 timeout_seconds=settings.llm_timeout_seconds,
             )
         )
-        self.daily_plan_parser = DailyPlanParser()
+        self.daily_plan_parser = DailyPlanV2Parser()
 
     def register_publication(self, payload: PublicationRegistrationRequest):
         return self.state.register_publication(payload)

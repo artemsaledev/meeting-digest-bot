@@ -173,18 +173,32 @@ def build_daily_plan_task_draft(
     if plan.source_meeting_ids:
         description_parts.extend(["", "Источник #daily встреч", *_to_bullets(plan.source_meeting_ids)])
 
+    if plan.summary:
+        description_parts.extend(["", "Краткое резюме", _truncate_text(plan.summary, 1200)])
+
     if plan.people:
         description_parts.extend(["", "План по людям"])
         for person_plan in plan.people:
+            if not person_plan.plan_items and not person_plan.blockers:
+                continue
             description_parts.append(f"{person_plan.person_name} ({person_plan.bitrix_user_id or 'без Bitrix ID'})")
             if person_plan.plan_items:
                 description_parts.extend(_to_bullets([item.title for item in person_plan.plan_items]))
             if person_plan.blockers:
-                description_parts.append("Блокеры:")
+                description_parts.append("Блокеры / зависимости:")
                 description_parts.extend(_to_bullets([item.title for item in person_plan.blockers]))
 
+    if plan.global_blockers:
+        description_parts.extend(["", "Общие блокеры / зависимости", *_to_bullets(plan.global_blockers)])
+
+    if plan.completed_items:
+        description_parts.extend(["", "Сделано / подтверждено на daily", *_to_bullets(plan.completed_items)])
+
+    if plan.review_notes:
+        description_parts.extend(["", "Служебные заметки разбора", *_to_bullets(plan.review_notes)])
+
     if plan.unmatched_items:
-        description_parts.extend(["", "Не удалось назначить ответственного", *_to_bullets(plan.unmatched_items)])
+        description_parts.extend(["", "Требует ручной проверки ответственного", *_to_bullets(plan.unmatched_items)])
 
     checklist_groups: list[ChecklistGroup] = []
     for person_plan in plan.people:
@@ -202,42 +216,31 @@ def build_daily_plan_task_draft(
                     },
                 )
             )
-        if person_plan.blockers:
-            for item in person_plan.blockers:
-                members = [item.bitrix_user_id] if item.bitrix_user_id else []
-                items.append(
-                    ChecklistItem(
-                        title=f"Блокер: {item.title}",
-                        members=members,
-                        meta={
-                            "person_name": item.person_name,
-                            "item_type": item.item_type,
-                            "source_meeting_id": item.source_meeting_id,
-                        },
-                    )
-                )
         if items:
             checklist_groups.append(ChecklistGroup(title=person_plan.person_name, items=items))
 
     comment_lines = [
-        f"План дня сформирован из #daily встреч за {plan.report_date.strftime('%d.%m.%Y')}.",
+        f"План дня сформирован из #daily встреч за {plan.report_date.strftime('%d.%m.%Y')} по daily_plan_v2.",
         f"Команда: {plan.team_name}",
         f"Ответственных найдено: {len(plan.people)}",
     ]
+    if plan.global_blockers:
+        comment_lines.append(f"Общих блокеров: {len(plan.global_blockers)}")
     if plan.unmatched_items:
-        comment_lines.append(f"Без ответственного: {len(plan.unmatched_items)}")
+        comment_lines.append(f"Требуют ручной проверки: {len(plan.unmatched_items)}")
 
     return TaskDraft(
         title=title,
         description="\n".join(description_parts).strip(),
         comment="\n".join(comment_lines).strip(),
         checklist_groups=checklist_groups,
-        tags=list(default_tags or []) + ["daily-plan"],
+        tags=list(dict.fromkeys(list(default_tags or []) + ["daily-plan", "daily-plan-v2"])),
         meta={
             "report_date": plan.report_date.isoformat(),
             "team_name": plan.team_name,
             "source_meeting_ids": plan.source_meeting_ids,
             "daily_plan": True,
+            "daily_plan_parser": "v2",
         },
     )
 
@@ -251,6 +254,13 @@ def _clean_list(values: object) -> list[str]:
         if text:
             result.append(text)
     return result
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    cleaned = str(text or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3].rstrip() + "..."
 
 
 def _extract_action_item_titles(values: object) -> list[str]:
