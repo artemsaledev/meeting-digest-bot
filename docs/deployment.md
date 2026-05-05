@@ -105,11 +105,13 @@ sudo systemctl restart cron || sudo systemctl restart crond
 Schedule:
 
 ```text
-09:00 Europe/Kyiv every day: daily-report --yesterday
-16:00 Europe/Kyiv every Friday: weekly-report --current-week
+Hourly cron gate: sends daily report when current Europe/Kyiv hour is 09
+Hourly cron gate: sends weekly report when current Europe/Kyiv weekday/hour is Friday 16
 ```
 
 The daily report adds a comment to the day plan task and posts a Telegram report with responsible usernames for open checklist items. The weekly report tags all responsible users with open items at once.
+
+The VPS system timezone may remain UTC. The cron file gates execution with `TZ=Europe/Kyiv date ...`, because Debian/Ubuntu cron may ignore `CRON_TZ` inside `/etc/cron.d` files.
 
 Manual report commands on the VPS:
 

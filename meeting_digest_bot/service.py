@@ -179,6 +179,44 @@ class MeetingDigestService:
         telegram_result = None
 
         if existing and not payload.force:
+            existing_meta = existing.get("meta") or {}
+            existing_telegram = existing_meta.get("telegram") or {}
+            telegram_already_sent = bool(existing_telegram.get("sent")) if isinstance(existing_telegram, dict) else False
+            if payload.send_telegram and not telegram_already_sent:
+                telegram_result = self._send_telegram_report(telegram_text)
+                self.state.upsert_task_binding(
+                    source_type=source_type,
+                    source_key=source_key,
+                    bitrix_task_id=report.task_id,
+                    mode="reported",
+                    title=f"Итоги плана дня {payload.report_date.strftime('%d.%m.%Y')}",
+                    meta={
+                        "report_date": payload.report_date.isoformat(),
+                        "team_name": payload.team_name,
+                        "total": report.total_items,
+                        "completed": report.completed_items,
+                        "open": report.open_count,
+                        "telegram": telegram_result,
+                        "telegram_text": telegram_text,
+                        "crm_comment": "already_reported",
+                    },
+                )
+                return SyncResult(
+                    action="daily_report_telegram_sent",
+                    task_id=report.task_id,
+                    task_url=report.task_url,
+                    title=f"Итоги плана дня {payload.report_date.strftime('%d.%m.%Y')}",
+                    source_type=source_type,
+                    source_key=source_key,
+                    details={
+                        "reason": "already_reported_without_telegram",
+                        "total": report.total_items,
+                        "completed": report.completed_items,
+                        "open": report.open_count,
+                        "telegram": telegram_result,
+                        "telegram_text": telegram_text,
+                    },
+                )
             return SyncResult(
                 action="daily_report_skipped",
                 task_id=report.task_id,

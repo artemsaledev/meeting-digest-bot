@@ -1,5 +1,7 @@
 SHELL=/bin/bash
-CRON_TZ=Europe/Kyiv
 
-0 9 * * * root cd /opt/meeting-digest-bot && .venv/bin/python -m meeting_digest_bot daily-report --yesterday >> /var/log/meeting-digest-bot-daily-report.log 2>&1
-0 16 * * 5 root cd /opt/meeting-digest-bot && .venv/bin/python -m meeting_digest_bot weekly-report --current-week >> /var/log/meeting-digest-bot-weekly-report.log 2>&1
+# Debian/Ubuntu cron on this VPS uses the server timezone (UTC) and does not
+# reliably apply CRON_TZ from /etc/cron.d files. Run hourly and gate by Kyiv
+# time inside the command so daylight saving time is handled correctly.
+0 * * * * root if [ "$(TZ=Europe/Kyiv date +\%H)" = "09" ]; then cd /opt/meeting-digest-bot && .venv/bin/python -m meeting_digest_bot daily-report --yesterday >> /var/log/meeting-digest-bot-daily-report.log 2>&1; fi
+0 * * * * root if [ "$(TZ=Europe/Kyiv date +\%u-\%H)" = "5-16" ]; then cd /opt/meeting-digest-bot && .venv/bin/python -m meeting_digest_bot weekly-report --current-week >> /var/log/meeting-digest-bot-weekly-report.log 2>&1; fi
