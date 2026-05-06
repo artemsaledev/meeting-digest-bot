@@ -36,6 +36,7 @@ class PublicationRegistrationRequest(BaseModel):
     source_url: str | None = None
     google_doc_url: str | None = None
     transcript_doc_url: str | None = None
+    source_tags: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

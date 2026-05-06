@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from .knowledge_alerts import write_knowledge_alert_chat_id
 from .models import (
     DailyPlanSyncRequest,
     DailyReportRequest,
@@ -68,6 +69,17 @@ class TelegramBotFacade:
 
         if self._is_help_command(text):
             response = TelegramResponse(ok=True, text=self._help_text())
+            if chat_id:
+                self.send_message(chat_id, response.text)
+            return response
+
+        if self._is_knowledge_alert_here_command(text):
+            saved = write_knowledge_alert_chat_id(chat_id)
+            response = TelegramResponse(
+                ok=True,
+                text=f"Knowledge Base alerts enabled for this chat: {saved}",
+                payload={"knowledge_alert_chat_id": saved},
+            )
             if chat_id:
                 self.send_message(chat_id, response.text)
             return response
@@ -276,8 +288,10 @@ class TelegramBotFacade:
                 source_url=metadata.get("source_url"),
                 google_doc_url=metadata.get("google_doc_url"),
                 transcript_doc_url=metadata.get("transcript_doc_url"),
+                source_tags=list(metadata.get("source_tags") or []),
                 payload={
                     "registered_from": "telegram_reply_command",
+                    "source_tags": list(metadata.get("source_tags") or []),
                     "doc_section_title": metadata.get("doc_section_title"),
                     "transcript_section_title": metadata.get("transcript_section_title"),
                 },
@@ -299,10 +313,11 @@ class TelegramBotFacade:
         )
 
     @staticmethod
-    def _extract_publication_metadata(text: str) -> dict[str, str | None]:
+    def _extract_publication_metadata(text: str) -> dict[str, object]:
         loom_match = LOOM_URL_RE.search(text)
         source_url = loom_match.group(0).rstrip(".,;") if loom_match else None
         loom_video_id = loom_match.group(1) if loom_match else None
+        source_tags = sorted(set(re.findall(r"#[\wА-Яа-яІіЇїЄєҐґ-]+", text, flags=re.UNICODE)))
 
         explicit_id = re.search(r"Loom video ID:\s*([A-Za-z0-9]+)", text, re.IGNORECASE)
         if explicit_id:
@@ -360,6 +375,7 @@ class TelegramBotFacade:
             "transcript_doc_url": transcript_doc_url,
             "doc_section_title": doc_section_title,
             "transcript_section_title": transcript_section_title,
+            "source_tags": source_tags,
         }
 
     @staticmethod
@@ -422,6 +438,11 @@ class TelegramBotFacade:
                 " зареєструй ",
             ]
         )
+
+    @classmethod
+    def _is_knowledge_alert_here_command(cls, text: str) -> bool:
+        cleaned = f" {cls._strip_bot_mention(text).strip().lower()} "
+        return any(marker in cleaned for marker in [" kb_alert_here ", " knowledge_alert_here ", " alerts_here "])
 
     @staticmethod
     def _help_text() -> str:

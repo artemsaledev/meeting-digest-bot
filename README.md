@@ -15,6 +15,7 @@ The service is intentionally separated from `AIcallorder`: `AIcallorder` records
 - Supports manual Telegram commands in a group by replying to a digest post.
 - Can aggregate daily and weekly meeting results.
 - Provides a foundation for `#daily` planning with Bitrix checklist members.
+- Exports large `#task_discussion` / `#task_demo` flows as accumulated knowledge-object bundles for a future Git/Notion/RAG knowledge base.
 
 ## Current Production Defaults
 
@@ -62,6 +63,16 @@ Technical command notes: [Telegram Usage](docs/telegram-usage.md).
 More details: [Bitrix Publication Rules](docs/bitrix-publication.md).
 
 Daily planning design: [Daily Plan](docs/daily-plan.md).
+Knowledge-base intake contour: [Knowledge Base Intake Contour](docs/knowledge-base-contour.md).
+
+Knowledge-base MVP commands:
+
+```powershell
+python -m meeting_digest_bot init-knowledge-repo --knowledge-dir company-knowledge
+python -m meeting_digest_bot upsert-knowledge --knowledge-dir company-knowledge
+python -m meeting_digest_bot index-knowledge --knowledge-dir company-knowledge
+python -m meeting_digest_bot ask-knowledge "Bitrix checklist" --knowledge-dir company-knowledge
+```
 
 Daily completion reports do not move open checklist items to the next day. They only read checklist completion status, add a report comment to the day task, and tag responsible users in Telegram. Cron runs daily reports at `09:00 Europe/Kyiv` and weekly daily-plan reports every Friday at `16:00 Europe/Kyiv`.
 

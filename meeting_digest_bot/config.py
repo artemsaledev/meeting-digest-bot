@@ -103,6 +103,7 @@ class Settings:
     telegram_webhook_secret: str | None
     telegram_channel_username: str | None
     telegram_report_chat_id: str | None
+    knowledge_alert_chat_id: str | None
     meeting_digest_shared_secret: str | None
     matching_task_limit: int
     matching_score_threshold: float
@@ -164,6 +165,7 @@ class Settings:
             telegram_webhook_secret=get_value("TELEGRAM_WEBHOOK_SECRET"),
             telegram_channel_username=get_value("TELEGRAM_CHANNEL_USERNAME"),
             telegram_report_chat_id=get_value("TELEGRAM_REPORT_CHAT_ID"),
+            knowledge_alert_chat_id=get_value("KNOWLEDGE_ALERT_CHAT_ID") or get_value("TELEGRAM_REPORT_CHAT_ID"),
             meeting_digest_shared_secret=get_value("MEETING_DIGEST_SHARED_SECRET"),
             matching_task_limit=int(str(get_value("MEETING_DIGEST_MATCHING_TASK_LIMIT", "50"))),
             matching_score_threshold=_parse_float(get_value("MEETING_DIGEST_MATCHING_SCORE_THRESHOLD"), 0.42),

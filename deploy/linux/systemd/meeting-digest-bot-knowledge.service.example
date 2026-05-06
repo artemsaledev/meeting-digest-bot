@@ -1,0 +1,10 @@
+[Unit]
+Description=MeetingDigestBot knowledge pipeline
+After=network.target meeting-digest-bot-api.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meeting-digest-bot
+EnvironmentFile=/opt/meeting-digest-bot/.env
+EnvironmentFile=-/opt/meeting-digest-bot/knowledge-pipeline.env
+ExecStart=/bin/bash -lc '/opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot process-knowledge-pipeline --knowledge-dir "${KNOWLEDGE_REPO_PATH:-/opt/company-knowledge}" --export-target notebooklm && /opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot sync-knowledge-notion --knowledge-dir "${KNOWLEDGE_REPO_PATH:-/opt/company-knowledge}" --apply'

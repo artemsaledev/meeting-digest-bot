@@ -13,6 +13,7 @@ mkdir -p "$APP_DIR"
 if command -v rsync >/dev/null 2>&1; then
   rsync -a --delete \
     --exclude='.env' \
+    --exclude='knowledge-pipeline.env' \
     --exclude='data/' \
     --exclude='.venv/' \
     --exclude='.deploy-backup/' \
@@ -20,6 +21,7 @@ if command -v rsync >/dev/null 2>&1; then
 else
   find "$APP_DIR" -mindepth 1 -maxdepth 1 \
     ! -name '.env' \
+    ! -name 'knowledge-pipeline.env' \
     ! -name 'data' \
     ! -name '.venv' \
     ! -name '.deploy-backup' \

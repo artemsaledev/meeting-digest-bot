@@ -1,0 +1,11 @@
+[Unit]
+Description=MeetingDigestBot Notion back-import proposal check
+After=network-online.target meeting-digest-bot-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meeting-digest-bot
+EnvironmentFile=/opt/meeting-digest-bot/.env
+EnvironmentFile=-/opt/meeting-digest-bot/knowledge-pipeline.env
+ExecStart=/bin/bash -lc '/opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot import-knowledge-notion --knowledge-dir "${KNOWLEDGE_REPO_PATH:-/opt/company-knowledge}" --notify-proposals'

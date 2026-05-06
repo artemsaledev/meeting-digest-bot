@@ -35,12 +35,18 @@ Payload shape:
   "source_url": "https://www.loom.com/share/...",
   "google_doc_url": "https://docs.google.com/document/d/.../edit",
   "transcript_doc_url": "https://docs.google.com/document/d/.../edit",
+  "source_tags": ["#task_discussion"],
   "payload": {
+    "source_tags": ["#task_discussion"],
     "doc_section_title": "Meeting Note: ...",
     "transcript_section_title": "Transcript: ..."
   }
 }
 ```
+
+`source_tags` is the stable contract for the knowledge-base intake contour.
+Large task flows should use `#task_discussion` or `#task_demo`; `#daily`
+remains an operational planning tag and is excluded from knowledge exports.
 
 ## Old Posts
 
@@ -69,4 +75,3 @@ The relevant table must contain:
 - `recorded_at`
 - `transcript_text`
 - `artifacts_json`
-
