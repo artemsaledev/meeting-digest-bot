@@ -46,7 +46,11 @@ class FakeTelegramBot(TelegramBotFacade):
 
 class TelegramKnowledgeAiTests(unittest.TestCase):
     def test_natural_mention_runs_kb_ai_with_buttons(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
             repo = KnowledgeRepository(Path(tmp))
             repo.upsert_objects([knowledge_object()])
             repo.build_index()
@@ -70,7 +74,11 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertIn("inline_keyboard", bot.messages[0]["reply_markup"])
 
     def test_kb_instruction_uses_instruction_answer_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
             repo = KnowledgeRepository(Path(tmp))
             repo.upsert_objects([knowledge_object()])
             repo.build_index()
@@ -135,6 +143,34 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertEqual(result.payload["intent"], "export_bundle")
             self.assertTrue(bot.documents)
             self.assertTrue(bot.documents[0]["path"].endswith(".zip"))
+
+    def test_mention_only_reply_to_voice_uses_transcription(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.build_index()
+            repo.build_chunk_index()
+
+            bot = FakeTelegramBot()
+            with patch.object(bot, "_transcribe_telegram_audio", return_value="kb? Bitrix checklist"):
+                result = bot.process_update(
+                    {
+                        "message": {
+                            "message_id": 12,
+                            "text": "@LLMeets_bot",
+                            "chat": {"id": 123},
+                            "reply_to_message": {"voice": {"file_id": "voice1"}},
+                        }
+                    }
+                )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.payload["intent"], "ask")
+            self.assertTrue(bot.messages)
 
 
 if __name__ == "__main__":

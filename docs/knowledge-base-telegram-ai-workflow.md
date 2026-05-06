@@ -227,6 +227,10 @@ backend:
 - export requests can attach the generated zip file to Telegram;
 - voice/audio messages are downloaded from Telegram and sent to the configured
   external AI transcription endpoint before intent handling.
+- polling includes `callback_query` updates, so inline buttons work in long
+  polling mode;
+- if the user replies to a voice message with only `@LLMeets_bot`, the bot
+  transcribes the replied voice message and treats it as the knowledge request.
 
 The current classifier is rule-based. It can be replaced later with the
 orchestrator prompt above while keeping the same intent handlers.

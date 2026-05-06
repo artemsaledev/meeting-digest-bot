@@ -70,7 +70,7 @@ class TelegramPollingWorker:
                 "offset": offset,
                 "timeout": self.poll_timeout_seconds,
                 "limit": limit,
-                "allowed_updates": ["message", "channel_post"],
+                "allowed_updates": ["message", "channel_post", "callback_query"],
             },
             timeout=self.poll_timeout_seconds + 10,
         )

@@ -72,6 +72,12 @@ class TelegramBotFacade:
         text = self._normalize_text(message.get("text") or message.get("caption") or "")
         if not text and (message.get("voice") or message.get("audio")):
             text = self._transcribe_telegram_audio(message)
+        if BOT_MENTION_RE.search(text) and self._is_mention_only(text):
+            reply = message.get("reply_to_message") or {}
+            if reply.get("voice") or reply.get("audio"):
+                transcribed = self._transcribe_telegram_audio(reply)
+                if transcribed:
+                    text = transcribed
         if not text:
             return TelegramResponse(
                 ok=False,
@@ -469,6 +475,13 @@ class TelegramBotFacade:
     def _should_handle_knowledge_ai(cls, text: str, *, message: dict) -> bool:
         cleaned = cls._strip_bot_mention(text).strip()
         lowered = cleaned.casefold()
+        if BOT_MENTION_RE.search(text) and not cleaned:
+            return True
+        if message.get("voice") or message.get("audio"):
+            return True
+        reply = message.get("reply_to_message") or {}
+        if BOT_MENTION_RE.search(text) and (reply.get("voice") or reply.get("audio")):
+            return True
         if BOT_MENTION_RE.search(text) and any(
             marker in lowered
             for marker in [
@@ -488,6 +501,10 @@ class TelegramBotFacade:
         ):
             return True
         return cleaned.startswith(("?", "kb?"))
+
+    @classmethod
+    def _is_mention_only(cls, text: str) -> bool:
+        return not cls._strip_bot_mention(text).strip()
 
     @staticmethod
     def _classify_knowledge_intent(query: str) -> str:
