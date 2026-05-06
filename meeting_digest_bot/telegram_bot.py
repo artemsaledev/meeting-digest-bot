@@ -78,6 +78,18 @@ class TelegramBotFacade:
                 transcribed = self._transcribe_telegram_audio(reply)
                 if transcribed:
                     text = transcribed
+                else:
+                    response = TelegramResponse(
+                        ok=False,
+                        text=(
+                            "Не удалось распознать голосовое сообщение. "
+                            "Напишите запрос текстом или попробуйте отправить voice еще раз и ответить на него `@LLMeets_bot`."
+                        ),
+                        payload={"intent": "voice_transcription_failed"},
+                    )
+                    if chat_id:
+                        self.send_message(chat_id, response.text, reply_to_message_id=message.get("message_id"))
+                    return response
         if not text:
             return TelegramResponse(
                 ok=False,
@@ -608,7 +620,8 @@ class TelegramBotFacade:
             download = requests.get(f"https://api.telegram.org/file/bot{self.token}/{file_path}", timeout=120)
             download.raise_for_status()
             return self._transcribe_audio_bytes(download.content, filename=Path(file_path).name)
-        except Exception:
+        except Exception as exc:
+            print(f"Telegram voice transcription failed: {exc}")
             return ""
 
     @staticmethod
