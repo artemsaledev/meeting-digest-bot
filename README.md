@@ -65,6 +65,7 @@ More details: [Bitrix Publication Rules](docs/bitrix-publication.md).
 Daily planning design: [Daily Plan](docs/daily-plan.md).
 Knowledge-base intake contour: [Knowledge Base Intake Contour](docs/knowledge-base-contour.md).
 Knowledge-base user guide: [Knowledge Base User Guide](docs/knowledge-base-user-guide.md).
+Knowledge-base Telegram AI workflow: [Telegram AI Workflow](docs/knowledge-base-telegram-ai-workflow.md).
 Knowledge-base governance: [Knowledge Base Governance](docs/knowledge-governance.md).
 
 Knowledge-base MVP commands:
