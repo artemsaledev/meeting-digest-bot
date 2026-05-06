@@ -262,6 +262,27 @@ class KnowledgeRepositoryTests(unittest.TestCase):
             self.assertIn("Technical Spec", text)
             self.assertIn("Create checklist groups", text)
 
+    def test_object_status_archives_from_indexes_and_quality_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            quality = repo.quality_report()
+            self.assertEqual(quality.counts_by_type["task_case"], 1)
+            self.assertEqual(len(quality.issues), 0)
+            repo.derive_catalogs()
+            self.assertTrue((Path(tmp) / "knowledge" / "features" / "feature__bitrix__checklists.json").exists())
+
+            result = repo.set_object_status(object_id="task_case__bitrix_123", status="archived")
+            self.assertEqual(result["status"], "archived")
+            repo.derive_catalogs()
+            index = repo.build_index()
+            chunks = repo.build_chunk_index()
+            self.assertEqual(index.objects_count, 0)
+            self.assertEqual(chunks.objects_count, 0)
+            self.assertFalse((Path(tmp) / "knowledge" / "features" / "feature__bitrix__checklists.json").exists())
+            quality_after = repo.quality_report()
+            self.assertEqual(quality_after.counts_by_status["archived"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

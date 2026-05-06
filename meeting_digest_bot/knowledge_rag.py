@@ -15,6 +15,13 @@ import requests
 
 DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-small"
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
+DEFAULT_MIN_ANSWER_SCORE = 0.18
+ANSWER_MODES = {
+    "general": "Give a concise operational answer.",
+    "user_instruction": "Write practical user-facing instructions with steps and caveats.",
+    "technical_spec": "Write a technical specification with requirements, constraints, and acceptance criteria.",
+    "support_answer": "Write a support-style answer that names the likely cause, action, and evidence.",
+}
 
 
 class EmbeddingClient(Protocol):
@@ -23,7 +30,14 @@ class EmbeddingClient(Protocol):
 
 
 class ChatClient(Protocol):
-    def answer(self, *, query: str, contexts: list[dict[str, Any]], model: str | None = None) -> str:
+    def answer(
+        self,
+        *,
+        query: str,
+        contexts: list[dict[str, Any]],
+        model: str | None = None,
+        answer_mode: str = "general",
+    ) -> str:
         ...
 
 
@@ -49,7 +63,15 @@ class ExternalAIClient:
         rows = sorted(data.get("data") or [], key=lambda item: int(item.get("index", 0)))
         return [[float(value) for value in row.get("embedding", [])] for row in rows]
 
-    def answer(self, *, query: str, contexts: list[dict[str, Any]], model: str | None = None) -> str:
+    def answer(
+        self,
+        *,
+        query: str,
+        contexts: list[dict[str, Any]],
+        model: str | None = None,
+        answer_mode: str = "general",
+    ) -> str:
+        mode_instruction = ANSWER_MODES.get(answer_mode, ANSWER_MODES["general"])
         context_text = "\n\n".join(
             [
                 "\n".join(
@@ -66,7 +88,9 @@ class ExternalAIClient:
                 "role": "system",
                 "content": (
                     "You answer using only the provided company knowledge contexts. "
-                    "Be concise, cite object_id/chunk_id when useful, and say when the context is insufficient."
+                    f"{mode_instruction} "
+                    "Always include compact citations as [object_id/chunk_id]. "
+                    "If the context is insufficient, say what is missing instead of guessing."
                 ),
             },
             {
@@ -115,6 +139,7 @@ class KnowledgeVectorStore:
     def build(self, *, client: EmbeddingClient, force: bool = False, batch_size: int = 32) -> dict[str, Any]:
         chunks = self._load_chunks()
         self._init_db()
+        self._delete_stale_embeddings({str(chunk.get("chunk_id")) for chunk in chunks if chunk.get("chunk_id")})
         existing = self._existing_hashes()
         to_embed = []
         for chunk in chunks:
@@ -132,6 +157,15 @@ class KnowledgeVectorStore:
                 raise RuntimeError(f"Embedding API returned {len(vectors)} vectors for {len(batch)} chunks.")
             self._upsert_embeddings(batch, vectors)
             embedded_count += len(batch)
+            self._write_usage(
+                {
+                    "operation": "build_embeddings",
+                    "model": self.embeddings_model,
+                    "texts_count": len(batch),
+                    "chars": sum(len(str(item.get("content") or "")) for item in batch),
+                    "estimated_tokens": sum(self._estimate_tokens(str(item.get("content") or "")) for item in batch),
+                }
+            )
 
         return {
             "ready": True,
@@ -154,6 +188,15 @@ class KnowledgeVectorStore:
     ) -> list[dict[str, Any]]:
         self._init_db()
         query_vector = client.embed_texts([query])[0]
+        self._write_usage(
+            {
+                "operation": "search_query_embedding",
+                "model": self.embeddings_model,
+                "texts_count": 1,
+                "chars": len(query),
+                "estimated_tokens": self._estimate_tokens(query),
+            }
+        )
         query_tokens = self._tokens(query)
         rows = self._all_embeddings()
         results = []
@@ -181,6 +224,8 @@ class KnowledgeVectorStore:
         system: str | None = None,
         object_type: str | None = None,
         threshold: float = 0.0,
+        min_score: float = DEFAULT_MIN_ANSWER_SCORE,
+        answer_mode: str = "general",
     ) -> dict[str, Any]:
         contexts = self.search(
             query,
@@ -194,15 +239,39 @@ class KnowledgeVectorStore:
             return {
                 "answer": "No relevant knowledge chunks found.",
                 "sources": [],
-                "mode": "rag",
+                "mode": answer_mode,
                 "confidence": "low",
             }
-        answer = chat_client.answer(query=query, contexts=contexts, model=model)
+        top_score = float(contexts[0].get("score") or 0.0)
+        if top_score < min_score:
+            return {
+                "answer": (
+                    "Context score is below the configured threshold, so I will not synthesize an answer. "
+                    "Narrow the query or lower min_score if this is intentional."
+                ),
+                "sources": contexts,
+                "mode": answer_mode,
+                "confidence": "low",
+                "top_score": top_score,
+            }
+        answer = chat_client.answer(query=query, contexts=contexts, model=model, answer_mode=answer_mode)
+        self._write_usage(
+            {
+                "operation": "answer",
+                "model": model or getattr(chat_client, "llm_model", None) or DEFAULT_LLM_MODEL,
+                "contexts_count": len(contexts),
+                "chars": len(query) + sum(len(str(item.get("content") or "")) for item in contexts),
+                "estimated_tokens": self._estimate_tokens(query)
+                + sum(self._estimate_tokens(str(item.get("content") or "")) for item in contexts),
+                "answer_mode": answer_mode,
+            }
+        )
         return {
             "answer": answer,
             "sources": contexts,
-            "mode": "rag",
-            "confidence": "medium" if contexts[0].get("score", 0) >= 0.2 else "low",
+            "mode": answer_mode,
+            "confidence": "medium" if top_score >= 0.2 else "low",
+            "top_score": top_score,
         }
 
     def stats(self) -> dict[str, Any]:
@@ -218,6 +287,36 @@ class KnowledgeVectorStore:
             "db_path": str(self.db_path),
             "chunks_embedded": int(count),
             "models": {str(model): int(total) for model, total in model_rows},
+            "usage": self.usage_stats(),
+        }
+
+    def usage_stats(self) -> dict[str, Any]:
+        path = self.root / "logs" / "rag_usage.jsonl"
+        if not path.exists():
+            return {"events": 0, "estimated_tokens": 0, "by_operation": {}, "by_model": {}}
+        events = 0
+        estimated_tokens = 0
+        by_operation: dict[str, int] = {}
+        by_model: dict[str, int] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events += 1
+            tokens = int(item.get("estimated_tokens") or 0)
+            estimated_tokens += tokens
+            operation = str(item.get("operation") or "unknown")
+            model = str(item.get("model") or "unknown")
+            by_operation[operation] = by_operation.get(operation, 0) + tokens
+            by_model[model] = by_model.get(model, 0) + tokens
+        return {
+            "events": events,
+            "estimated_tokens": estimated_tokens,
+            "by_operation": by_operation,
+            "by_model": by_model,
         }
 
     def _load_chunks(self) -> list[dict[str, Any]]:
@@ -264,6 +363,31 @@ class KnowledgeVectorStore:
         finally:
             conn.close()
         return {str(chunk_id): str(content_hash) for chunk_id, content_hash in rows}
+
+    def _delete_stale_embeddings(self, current_chunk_ids: set[str]) -> None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT chunk_id FROM embeddings WHERE model = ?",
+                (self.embeddings_model,),
+            ).fetchall()
+            stale = [str(chunk_id) for (chunk_id,) in rows if str(chunk_id) not in current_chunk_ids]
+            if stale:
+                conn.executemany(
+                    "DELETE FROM embeddings WHERE model = ? AND chunk_id = ?",
+                    [(self.embeddings_model, chunk_id) for chunk_id in stale],
+                )
+                conn.commit()
+                self._write_usage(
+                    {
+                        "operation": "delete_stale_embeddings",
+                        "model": self.embeddings_model,
+                        "chunks_count": len(stale),
+                        "estimated_tokens": 0,
+                    }
+                )
+        finally:
+            conn.close()
 
     def _upsert_embeddings(self, chunks: list[dict[str, Any]], vectors: list[list[float]]) -> None:
         now = datetime.now(UTC).isoformat()
@@ -393,6 +517,17 @@ class KnowledgeVectorStore:
         if object_type and str(metadata.get("object_type") or "").casefold() != object_type.casefold():
             return False
         return True
+
+    def _write_usage(self, item: dict[str, Any]) -> None:
+        path = self.root / "logs" / "rag_usage.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        item = {"created_at": datetime.now(UTC).isoformat(), **item}
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, int(len(str(text or "")) / 4))
 
 
 def client_from_env(env: dict[str, str], *, require_llm: bool = False) -> ExternalAIClient | None:

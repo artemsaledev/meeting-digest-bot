@@ -131,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
     rag_ask.add_argument("--system")
     rag_ask.add_argument("--object-type")
     rag_ask.add_argument("--threshold", type=float, default=0.0)
+    rag_ask.add_argument("--min-score", type=float, default=0.18)
+    rag_ask.add_argument(
+        "--answer-mode",
+        choices=["general", "user_instruction", "technical_spec", "support_answer"],
+        default="general",
+    )
 
     derive_catalogs = subparsers.add_parser("derive-knowledge-catalogs")
     derive_catalogs.add_argument("--knowledge-dir", default="company-knowledge")
@@ -186,6 +192,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     health = subparsers.add_parser("knowledge-health")
     health.add_argument("--knowledge-dir", default="company-knowledge")
+
+    quality = subparsers.add_parser("knowledge-quality-report")
+    quality.add_argument("--knowledge-dir", default="company-knowledge")
+
+    object_status = subparsers.add_parser("set-knowledge-object-status")
+    object_status.add_argument("--knowledge-dir", default="company-knowledge")
+    object_status.add_argument("--object-id", required=True)
+    object_status.add_argument("--status", choices=["draft", "approved", "archived"], required=True)
+
+    rag_costs = subparsers.add_parser("knowledge-rag-costs")
+    rag_costs.add_argument("--knowledge-dir", default="company-knowledge")
 
     alert_chat = subparsers.add_parser("set-knowledge-alert-chat")
     alert_chat.add_argument("--chat-id", required=True)
@@ -448,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
                     system=args.system,
                     object_type=args.object_type,
                     threshold=args.threshold,
+                    min_score=args.min_score,
+                    answer_mode=args.answer_mode,
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -572,6 +591,23 @@ def main(argv: list[str] | None = None) -> int:
             "rag": KnowledgeVectorStore(repo.root).stats(),
         }
         print(json.dumps(health, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "knowledge-quality-report":
+        result = KnowledgeRepository(Path(args.knowledge_dir)).quality_report()
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "set-knowledge-object-status":
+        result = KnowledgeRepository(Path(args.knowledge_dir)).set_object_status(
+            object_id=args.object_id,
+            status=args.status,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "knowledge-rag-costs":
+        print(json.dumps(KnowledgeVectorStore(Path(args.knowledge_dir)).usage_stats(), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "set-knowledge-alert-chat":

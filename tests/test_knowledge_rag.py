@@ -23,8 +23,8 @@ class FakeAIClient:
             )
         return vectors
 
-    def answer(self, *, query: str, contexts: list[dict], model: str | None = None) -> str:
-        return f"answer for {query}: {contexts[0]['object_id']} / {contexts[0]['chunk_id']}"
+    def answer(self, *, query: str, contexts: list[dict], model: str | None = None, answer_mode: str = "general") -> str:
+        return f"{answer_mode} answer for {query}: {contexts[0]['object_id']} / {contexts[0]['chunk_id']}"
 
 
 class KnowledgeRagTests(unittest.TestCase):
@@ -57,10 +57,26 @@ class KnowledgeRagTests(unittest.TestCase):
             self.assertTrue(filtered)
             self.assertTrue(all(item["object_type"] == "task_case" for item in filtered))
 
-            answer = store.answer("How does checklist sync work?", embedding_client=client, chat_client=client)
-            self.assertEqual(answer["mode"], "rag")
+            answer = store.answer(
+                "How does checklist sync work?",
+                embedding_client=client,
+                chat_client=client,
+                answer_mode="technical_spec",
+            )
+            self.assertEqual(answer["mode"], "technical_spec")
             self.assertTrue(answer["sources"])
             self.assertIn("task_case__bitrix_123", answer["answer"])
+            self.assertIn("technical_spec answer", answer["answer"])
+            self.assertGreater(store.usage_stats()["events"], 0)
+
+            refused = store.answer(
+                "duplicate",
+                embedding_client=client,
+                chat_client=client,
+                min_score=99.0,
+            )
+            self.assertEqual(refused["confidence"], "low")
+            self.assertIn("below the configured threshold", refused["answer"])
 
 
 if __name__ == "__main__":

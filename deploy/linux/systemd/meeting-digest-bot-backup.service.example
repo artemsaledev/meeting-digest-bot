@@ -1,0 +1,11 @@
+[Unit]
+Description=Meeting Digest Bot knowledge backup
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meeting-digest-bot
+Environment=BACKUP_ROOT=/opt/backups/meeting-digest-bot
+Environment=KNOWLEDGE_REPO=/opt/company-knowledge
+Environment=BOT_DATA_DIR=/opt/meeting-digest-bot/data
+Environment=AICALLORDER_DB=/opt/AIcallorder/data/loom_automation.db
+ExecStart=/opt/meeting-digest-bot/deploy/linux/backup_knowledge.sh

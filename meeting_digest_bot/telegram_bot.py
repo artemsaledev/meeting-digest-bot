@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .knowledge_alerts import write_knowledge_alert_chat_id
+from .knowledge_alerts import read_knowledge_alert_chat_id, write_knowledge_alert_chat_id
+from .knowledge_rag import KnowledgeVectorStore, client_from_env
 from .knowledge_repo import KnowledgeRepository
 from .models import (
     DailyPlanSyncRequest,
@@ -250,11 +251,50 @@ class TelegramBotFacade:
                     return TelegramResponse(ok=False, text=f"KB proposal not found: {token}")
                 proposal = repo.apply_resolved_revision(metadata_path=metadata_path)
                 return TelegramResponse(ok=True, text=f"KB proposal {proposal.object_id}: applied", payload=proposal.model_dump())
+            if action == "health":
+                pending = len(repo.list_revision_metadata(status="draft"))
+                rag = KnowledgeVectorStore(repo.root).stats()
+                quality = repo.quality_report()
+                lines = [
+                    "KB health:",
+                    f"- repo: {repo.root}",
+                    f"- pending proposals: {pending}",
+                    f"- rag chunks: {rag.get('chunks_embedded', 0)}",
+                    f"- rag usage tokens: {(rag.get('usage') or {}).get('estimated_tokens', 0)}",
+                    f"- quality issues: {len(quality.issues)}",
+                    f"- alert chat: {os.environ.get('KNOWLEDGE_ALERT_CHAT_ID') or read_knowledge_alert_chat_id() or '-'}",
+                ]
+                return TelegramResponse(ok=True, text="\n".join(lines), payload={"pending_proposals": pending, "rag": rag})
+            if action == "ask":
+                question = args[len(parts[0]) :].strip() if parts else ""
+                if not question:
+                    return TelegramResponse(ok=False, text="Usage: kb ask <question>")
+                client = client_from_env(dict(os.environ), require_llm=True)
+                if client:
+                    store = KnowledgeVectorStore(
+                        repo.root,
+                        db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
+                        embeddings_model=client.embeddings_model,
+                    )
+                    result = store.answer(question, embedding_client=client, chat_client=client, limit=5, min_score=0.18)
+                else:
+                    result = repo.ask(question, limit=5)
+                sources = result.get("sources") or []
+                source_lines = []
+                for item in sources[:3]:
+                    source_lines.append(f"- {item.get('object_id')} / {item.get('chunk_id') or item.get('score')}")
+                text = str(result.get("answer") or "")
+                if source_lines:
+                    text = text.strip() + "\n\nSources:\n" + "\n".join(source_lines)
+                return TelegramResponse(ok=True, text=text[:3900], payload={"sources_count": len(sources)})
         except Exception as exc:
             return TelegramResponse(ok=False, text=f"KB command failed: {exc}")
         return TelegramResponse(
             ok=True,
-            text="KB commands: kb proposals | kb diff <id> | kb approve <id> | kb reject <id> | kb apply <id>",
+            text=(
+                "KB commands: kb health | kb ask <question> | kb proposals | kb diff <id> | "
+                "kb approve <id> | kb reject <id> | kb apply <id>"
+            ),
         )
 
     def send_message(self, chat_id: int | str, text: str) -> dict:

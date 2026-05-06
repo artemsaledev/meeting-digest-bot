@@ -41,6 +41,13 @@ class KnowledgeRagQueryRequest(BaseModel):
     system: str | None = None
     object_type: str | None = None
     threshold: float = 0.0
+    min_score: float = 0.18
+    answer_mode: str = "general"
+
+
+class KnowledgeObjectStatusRequest(BaseModel):
+    object_id: str
+    status: str
 
 
 @app.get("/health")
@@ -119,6 +126,8 @@ def ask_knowledge_rag(payload: KnowledgeRagQueryRequest, _: None = Depends(_requ
         system=payload.system,
         object_type=payload.object_type,
         threshold=payload.threshold,
+        min_score=payload.min_score,
+        answer_mode=payload.answer_mode,
     )
     return {"ok": True, "result": result}
 
@@ -144,6 +153,7 @@ def _knowledge_admin_status() -> dict:
         "knowledge_dir": str(repo.root),
         "counts": counts,
         "rag": _knowledge_vector_store().stats(),
+        "quality": _knowledge_repo().quality_report().model_dump(),
         "draft_proposals": len(proposals),
         "draft_proposal_items": [
             {
@@ -204,6 +214,8 @@ def knowledge_admin_dashboard(_: None = Depends(_require_admin_token)) -> str:
         </div>
         <h2>RAG</h2>
         <pre>{status['rag']}</pre>
+        <h2>Quality</h2>
+        <pre>{status['quality']}</pre>
         <h2>Draft Proposals ({status['draft_proposals']})</h2>
         <table><tr><th>Object</th><th>Source</th><th>Status</th><th>Metadata</th></tr>{''.join(rows) or '<tr><td colspan="4">No draft proposals</td></tr>'}</table>
         <h2>Latest Runs</h2>
@@ -211,6 +223,27 @@ def knowledge_admin_dashboard(_: None = Depends(_require_admin_token)) -> str:
       </body>
     </html>
     """
+
+
+@app.post("/knowledge/admin/rag/reindex")
+def knowledge_admin_reindex_rag(_: None = Depends(_require_admin_token)) -> dict:
+    client = client_from_env(dict(os.environ))
+    if not client:
+        raise HTTPException(status_code=400, detail="KNOWLEDGE_RAG_API_KEY, OPENAI_API_KEY, or LLM_API_KEY is required.")
+    repo = _knowledge_repo()
+    chunk_index = repo.build_chunk_index()
+    rag = _knowledge_vector_store().build(client=client)
+    return {"ok": True, "chunk_index": chunk_index.model_dump(), "rag": rag}
+
+
+@app.post("/knowledge/admin/object-status")
+def knowledge_admin_set_object_status(payload: KnowledgeObjectStatusRequest, _: None = Depends(_require_admin_token)) -> dict:
+    return {"ok": True, "result": _knowledge_repo().set_object_status(object_id=payload.object_id, status=payload.status)}
+
+
+@app.get("/knowledge/admin/quality")
+def knowledge_admin_quality(_: None = Depends(_require_admin_token)) -> dict:
+    return {"ok": True, "quality": _knowledge_repo().quality_report().model_dump()}
 
 
 @app.get("/knowledge/object/{object_id}")

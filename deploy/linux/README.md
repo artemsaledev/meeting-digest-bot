@@ -134,6 +134,22 @@ journalctl -u meeting-digest-bot-api.service -n 100 --no-pager
 journalctl -u meeting-digest-bot-poller.service -n 100 --no-pager
 ```
 
+## 7a. Backups
+
+Install the backup service and timer after the app is deployed:
+
+```bash
+cp deploy/linux/systemd/meeting-digest-bot-backup.service.example /etc/systemd/system/meeting-digest-bot-backup.service
+cp deploy/linux/systemd/meeting-digest-bot-backup.timer.example /etc/systemd/system/meeting-digest-bot-backup.timer
+chmod +x deploy/linux/backup_knowledge.sh
+systemctl daemon-reload
+systemctl enable --now meeting-digest-bot-backup.timer
+systemctl start meeting-digest-bot-backup.service
+```
+
+Backups are written to `/opt/backups/meeting-digest-bot` and include the
+canonical knowledge repository, bot state data, and the AIcallorder SQLite DB.
+
 ## 8. Bot Commands
 
 The bot supports English and Russian action words. English examples are safer for console copy/paste:

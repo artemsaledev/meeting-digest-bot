@@ -97,6 +97,21 @@ class KnowledgeNotionImportResult(BaseModel):
     message: str = ""
 
 
+class KnowledgeQualityIssue(BaseModel):
+    object_id: str
+    object_type: str
+    path: str
+    severity: str
+    message: str
+
+
+class KnowledgeQualityReport(BaseModel):
+    generated_at: str
+    counts_by_status: dict[str, int] = Field(default_factory=dict)
+    counts_by_type: dict[str, int] = Field(default_factory=dict)
+    issues: list[KnowledgeQualityIssue] = Field(default_factory=list)
+
+
 class KnowledgeCatalogObject(BaseModel):
     object_id: str
     object_type: str
@@ -164,7 +179,7 @@ class KnowledgeRepository:
     def derive_catalogs(self) -> KnowledgeRepoResult:
         """Build Systems, Features, and Instructions from canonical task cases."""
         self.init()
-        task_cases = self._load_task_cases()
+        task_cases = self._load_task_cases(include_archived=False)
         written: list[str] = []
         object_ids: list[str] = []
 
@@ -181,6 +196,9 @@ class KnowledgeRepository:
         for item in instructions:
             written.extend(self._write_catalog_object(item, directory="instructions", database="Instructions"))
             object_ids.append(item.object_id)
+        written.extend(self._prune_catalog_directory("systems", {item.object_id for item in systems}))
+        written.extend(self._prune_catalog_directory("features", {item.object_id for item in features}))
+        written.extend(self._prune_catalog_directory("instructions", {item.object_id for item in instructions}))
 
         return KnowledgeRepoResult(
             root=str(self.root),
@@ -197,6 +215,8 @@ class KnowledgeRepository:
                 continue
             data = self._read_json(path)
             if not data:
+                continue
+            if self._is_archived(data):
                 continue
             text = self._index_text(data)
             docs.append(
@@ -227,6 +247,8 @@ class KnowledgeRepository:
                 continue
             data = self._read_json(path)
             if not data:
+                continue
+            if self._is_archived(data):
                 continue
             for idx, chunk in enumerate(self._chunks_for_object(data), start=1):
                 chunks.append(
@@ -334,6 +356,53 @@ class KnowledgeRepository:
             metadata_path=str(metadata_path),
             source_path=str(source_path),
             created_at=created_at,
+        )
+
+    def set_object_status(self, *, object_id: str, status: str) -> dict[str, Any]:
+        if status not in {"draft", "approved", "archived"}:
+            raise ValueError("Knowledge object status must be draft, approved, or archived.")
+        path = self._canonical_object_path(object_id)
+        if not path:
+            raise FileNotFoundError(f"Knowledge object is not found: {object_id}")
+        data = self._read_json(path)
+        data["status"] = status
+        data["updated_at"] = datetime.now(UTC).isoformat()
+        if status == "archived":
+            data["archived_at"] = data["updated_at"]
+            data["needs_human_review"] = False
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._rewrite_object_artifacts(path, data)
+        return {"object_id": object_id, "status": status, "path": str(path)}
+
+    def quality_report(self) -> KnowledgeQualityReport:
+        counts_by_status: dict[str, int] = {}
+        counts_by_type: dict[str, int] = {}
+        issues: list[KnowledgeQualityIssue] = []
+        for path in self._knowledge_json_paths(include_archived=True):
+            data = self._read_json(path)
+            if not data:
+                continue
+            object_id = str(data.get("object_id") or path.stem)
+            object_type = str(data.get("object_type") or self._infer_object_type_from_path(path))
+            status = str(data.get("status") or "draft")
+            counts_by_status[status] = counts_by_status.get(status, 0) + 1
+            counts_by_type[object_type] = counts_by_type.get(object_type, 0) + 1
+            if status == "archived":
+                continue
+            if object_type == "task_case":
+                if not data.get("source_events"):
+                    issues.append(self._quality_issue(object_id, object_type, path, "high", "Task case has no source_events."))
+                if not data.get("current_requirements"):
+                    issues.append(self._quality_issue(object_id, object_type, path, "medium", "Task case has no current_requirements."))
+                if not data.get("acceptance_criteria"):
+                    issues.append(self._quality_issue(object_id, object_type, path, "medium", "Task case has no acceptance_criteria."))
+            if object_type in {"system", "feature", "instruction"} and not data.get("source_task_cases"):
+                issues.append(self._quality_issue(object_id, object_type, path, "medium", "Derived object has no source_task_cases."))
+        return KnowledgeQualityReport(
+            generated_at=datetime.now(UTC).isoformat(),
+            counts_by_status=counts_by_status,
+            counts_by_type=counts_by_type,
+            issues=issues,
         )
 
     def set_revision_status(self, *, metadata_path: Path, status: str) -> KnowledgeRevisionProposal:
@@ -753,21 +822,28 @@ class KnowledgeRepository:
             message="Notion import proposals generated." if proposals else "No Notion edits detected.",
         )
 
-    def _load_task_cases(self) -> list[dict[str, Any]]:
+    def _load_task_cases(self, *, include_archived: bool = True) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for path in sorted((self.root / "knowledge" / "task_cases").glob("*.json")):
             if path.name.endswith(".notion.json"):
                 continue
             data = self._read_json(path)
-            if data:
+            if data and (include_archived or not self._is_archived(data)):
                 items.append(data)
         return items
 
-    def _knowledge_json_paths(self) -> list[Path]:
+    def _knowledge_json_paths(self, *, include_archived: bool = False) -> list[Path]:
         paths: list[Path] = []
         for rel_dir in KNOWLEDGE_OBJECT_DIRS.values():
             paths.extend(sorted((self.root / rel_dir).glob("*.json")))
-        return [path for path in paths if not path.name.endswith(".notion.json")]
+        result = []
+        for path in paths:
+            if path.name.endswith(".notion.json"):
+                continue
+            if not include_archived and self._is_archived(self._read_json(path)):
+                continue
+            result.append(path)
+        return result
 
     def _revision_metadata_paths(self) -> list[Path]:
         paths = []
@@ -880,6 +956,24 @@ class KnowledgeRepository:
             encoding="utf-8",
         )
         return [str(json_path), str(md_path), str(notion_path)]
+
+    def _prune_catalog_directory(self, directory: str, expected_object_ids: set[str]) -> list[str]:
+        target_dir = self.root / "knowledge" / directory
+        removed: list[str] = []
+        if not target_dir.exists():
+            return removed
+        for json_path in sorted(target_dir.glob("*.json")):
+            if json_path.name.endswith(".notion.json"):
+                continue
+            data = self._read_json(json_path)
+            object_id = str(data.get("object_id") or json_path.stem)
+            if object_id in expected_object_ids:
+                continue
+            for path in (json_path, json_path.with_suffix(".md"), json_path.with_suffix(".notion.json")):
+                if path.exists():
+                    path.unlink()
+                    removed.append(str(path))
+        return removed
 
     def _write_notion_import_proposal(
         self,
@@ -1524,6 +1618,30 @@ class KnowledgeRepository:
         lines.extend([f"## {title}", ""])
         lines.extend(f"- {value}" for value in values)
         lines.append("")
+
+    @staticmethod
+    def _is_archived(data: dict[str, Any]) -> bool:
+        return str(data.get("status") or "").casefold() == "archived"
+
+    @staticmethod
+    def _infer_object_type_from_path(path: Path) -> str:
+        directory = path.parent.name
+        return {
+            "task_cases": "task_case",
+            "systems": "system",
+            "features": "feature",
+            "instructions": "instruction",
+        }.get(directory, "unknown")
+
+    @staticmethod
+    def _quality_issue(object_id: str, object_type: str, path: Path, severity: str, message: str) -> KnowledgeQualityIssue:
+        return KnowledgeQualityIssue(
+            object_id=object_id,
+            object_type=object_type,
+            path=str(path),
+            severity=severity,
+            message=message,
+        )
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:

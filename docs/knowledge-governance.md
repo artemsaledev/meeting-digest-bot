@@ -41,6 +41,30 @@ Run:
 python -m meeting_digest_bot knowledge-health --knowledge-dir /opt/company-knowledge
 ```
 
+## Operational commands
+
+Use `kb health` in the Telegram admin group for a short live status: pending
+proposals, RAG chunk count, usage estimate, and quality issue count.
+
+Use `kb ask <question>` to query the canonical knowledge base from Telegram. The
+bot uses the external embedding/LLM RAG path when configured and falls back to
+local lexical search when external AI credentials are missing.
+
+Use the CLI for controlled governance actions:
+
+```bash
+python -m meeting_digest_bot knowledge-quality-report --knowledge-dir /opt/company-knowledge
+python -m meeting_digest_bot set-knowledge-object-status --knowledge-dir /opt/company-knowledge --object-id task_case__... --status approved
+python -m meeting_digest_bot set-knowledge-object-status --knowledge-dir /opt/company-knowledge --object-id task_case__... --status archived
+python -m meeting_digest_bot knowledge-rag-costs --knowledge-dir /opt/company-knowledge
+```
+
+Archived objects remain in Git for audit, but they are excluded from derived
+catalogs, the lexical index, chunk index, RAG index, and external export bundles.
+
+Backups are handled by `meeting-digest-bot-backup.timer`; archives are written
+to `/opt/backups/meeting-digest-bot` with a default 14 day retention window.
+
 Expected healthy state:
 
 - last pipeline run status is `success`;

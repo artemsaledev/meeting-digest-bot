@@ -151,7 +151,12 @@ class NotionKnowledgeClient:
         return results
 
     def archive_block(self, block_id: str) -> dict[str, Any]:
-        return self._request("PATCH", f"/blocks/{block_id}", json={"archived": True})
+        try:
+            return self._request("PATCH", f"/blocks/{block_id}", json={"archived": True})
+        except RuntimeError as exc:
+            if "Can't edit block that is archived" in str(exc):
+                return {"id": block_id, "archived": True, "already_archived": True}
+            raise
 
     def append_blocks(self, block_id: str, blocks: list[dict[str, Any]]) -> None:
         for start in range(0, len(blocks), NOTION_BLOCK_BATCH_LIMIT):
