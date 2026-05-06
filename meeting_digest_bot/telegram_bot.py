@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import os
+from pathlib import Path
 import re
 from zoneinfo import ZoneInfo
 
 import requests
 
 from .knowledge_alerts import write_knowledge_alert_chat_id
+from .knowledge_repo import KnowledgeRepository
 from .models import (
     DailyPlanSyncRequest,
     DailyReportRequest,
@@ -83,6 +86,12 @@ class TelegramBotFacade:
             if chat_id:
                 self.send_message(chat_id, response.text)
             return response
+
+        kb_response = self._process_kb_command(text)
+        if kb_response:
+            if chat_id:
+                self.send_message(chat_id, kb_response.text)
+            return kb_response
 
         if self._is_register_command(text):
             response = self._register_publication_from_reply(message)
@@ -201,6 +210,51 @@ class TelegramBotFacade:
             ok=True,
             text=str((result.details or {}).get("telegram_text") or self._format_sync_result("итогов плана дня", result)),
             payload=result.model_dump(),
+        )
+
+    def _process_kb_command(self, text: str) -> TelegramResponse | None:
+        command_text = self._strip_bot_mention(text).strip()
+        match = re.match(r"^(?:/)?kb(?:\s+|$)(.*)$", command_text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        args = match.group(1).strip()
+        parts = args.split()
+        action = (parts[0].lower() if parts else "help").strip()
+        token = parts[1] if len(parts) > 1 else ""
+        repo = KnowledgeRepository(Path(os.environ.get("KNOWLEDGE_REPO_PATH", "company-knowledge")))
+        try:
+            if action in {"proposals", "proposal", "list"}:
+                items = repo.list_revision_metadata(status="draft")
+                if not items:
+                    return TelegramResponse(ok=True, text="KB proposals: no draft proposals.")
+                lines = [f"KB proposals: {len(items)} draft"]
+                for item in items[:10]:
+                    lines.append(f"- {item.get('object_id')} [{item.get('source') or 'revision'}] status={item.get('status')}")
+                if len(items) > 10:
+                    lines.append(f"...and {len(items) - 10} more")
+                return TelegramResponse(ok=True, text="\n".join(lines), payload={"count": len(items)})
+            if action in {"diff", "show"} and token:
+                metadata_path = repo.resolve_revision_metadata(token)
+                if not metadata_path:
+                    return TelegramResponse(ok=False, text=f"KB proposal not found: {token}")
+                return TelegramResponse(ok=True, text=f"KB diff for {token}:\n{repo.revision_diff_text(metadata_path=metadata_path)}")
+            if action in {"approve", "reject"} and token:
+                metadata_path = repo.resolve_revision_metadata(token)
+                if not metadata_path:
+                    return TelegramResponse(ok=False, text=f"KB proposal not found: {token}")
+                proposal = repo.set_revision_status(metadata_path=metadata_path, status="approved" if action == "approve" else "rejected")
+                return TelegramResponse(ok=True, text=f"KB proposal {proposal.object_id}: {proposal.status}", payload=proposal.model_dump())
+            if action == "apply" and token:
+                metadata_path = repo.resolve_revision_metadata(token)
+                if not metadata_path:
+                    return TelegramResponse(ok=False, text=f"KB proposal not found: {token}")
+                proposal = repo.apply_resolved_revision(metadata_path=metadata_path)
+                return TelegramResponse(ok=True, text=f"KB proposal {proposal.object_id}: applied", payload=proposal.model_dump())
+        except Exception as exc:
+            return TelegramResponse(ok=False, text=f"KB command failed: {exc}")
+        return TelegramResponse(
+            ok=True,
+            text="KB commands: kb proposals | kb diff <id> | kb approve <id> | kb reject <id> | kb apply <id>",
         )
 
     def send_message(self, chat_id: int | str, text: str) -> dict:

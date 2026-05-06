@@ -1,0 +1,9 @@
+[Unit]
+Description=MeetingDigestBot failure alert for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/meeting-digest-bot
+EnvironmentFile=/opt/meeting-digest-bot/.env
+EnvironmentFile=-/opt/meeting-digest-bot/knowledge-pipeline.env
+ExecStart=/bin/bash -lc '/opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot send-knowledge-failure-alert --operation "%i" --status failed --details "$(journalctl -u "%i" -n 40 --no-pager -o cat | tail -c 2500)"'

@@ -8,7 +8,13 @@ from zoneinfo import ZoneInfo
 
 from .config import Settings
 from .kb_intake import KnowledgeIntake
-from .knowledge_alerts import format_notion_import_alert, read_knowledge_alert_chat_id, send_knowledge_alert, write_knowledge_alert_chat_id
+from .knowledge_alerts import (
+    format_failure_alert,
+    format_notion_import_alert,
+    read_knowledge_alert_chat_id,
+    send_knowledge_alert,
+    write_knowledge_alert_chat_id,
+)
 from .knowledge_rag import KnowledgeVectorStore, client_from_env
 from .knowledge_repo import KnowledgeRepository
 from .models import DailyPlanSyncRequest, DailyReportRequest, PostSyncRequest, PublicationRegistrationRequest, SyncAction, WeekSyncRequest, WeeklyReportRequest
@@ -114,11 +120,17 @@ def build_parser() -> argparse.ArgumentParser:
     rag_search.add_argument("query")
     rag_search.add_argument("--knowledge-dir", default="company-knowledge")
     rag_search.add_argument("--limit", type=int, default=5)
+    rag_search.add_argument("--system")
+    rag_search.add_argument("--object-type")
+    rag_search.add_argument("--threshold", type=float, default=0.0)
 
     rag_ask = subparsers.add_parser("rag-knowledge")
     rag_ask.add_argument("query")
     rag_ask.add_argument("--knowledge-dir", default="company-knowledge")
     rag_ask.add_argument("--limit", type=int, default=5)
+    rag_ask.add_argument("--system")
+    rag_ask.add_argument("--object-type")
+    rag_ask.add_argument("--threshold", type=float, default=0.0)
 
     derive_catalogs = subparsers.add_parser("derive-knowledge-catalogs")
     derive_catalogs.add_argument("--knowledge-dir", default="company-knowledge")
@@ -177,6 +189,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     alert_chat = subparsers.add_parser("set-knowledge-alert-chat")
     alert_chat.add_argument("--chat-id", required=True)
+
+    failure_alert = subparsers.add_parser("send-knowledge-failure-alert")
+    failure_alert.add_argument("--operation", required=True)
+    failure_alert.add_argument("--status", default="error")
+    failure_alert.add_argument("--details", default="")
 
     pipeline = subparsers.add_parser("process-knowledge-pipeline")
     pipeline.add_argument("--knowledge-dir", default="company-knowledge")
@@ -390,7 +407,23 @@ def main(argv: list[str] | None = None) -> int:
             db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
             embeddings_model=client.embeddings_model,
         )
-        print(json.dumps({"ready": True, "results": store.search(args.query, client=client, limit=args.limit)}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "ready": True,
+                    "results": store.search(
+                        args.query,
+                        client=client,
+                        limit=args.limit,
+                        system=args.system,
+                        object_type=args.object_type,
+                        threshold=args.threshold,
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "rag-knowledge":
@@ -405,7 +438,21 @@ def main(argv: list[str] | None = None) -> int:
             db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
             embeddings_model=client.embeddings_model,
         )
-        print(json.dumps(store.answer(args.query, embedding_client=client, chat_client=client, limit=args.limit), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                store.answer(
+                    args.query,
+                    embedding_client=client,
+                    chat_client=client,
+                    limit=args.limit,
+                    system=args.system,
+                    object_type=args.object_type,
+                    threshold=args.threshold,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
 
     if args.command == "derive-knowledge-catalogs":
@@ -533,6 +580,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"knowledge_alert_chat_id": value, "telegram_alert": result}, ensure_ascii=False, indent=2))
         return 0
 
+    if args.command == "send-knowledge-failure-alert":
+        result = send_knowledge_alert(
+            settings,
+            format_failure_alert(operation=args.operation, status=args.status, details=args.details),
+        )
+        print(json.dumps({"telegram_alert": result}, ensure_ascii=False, indent=2))
+        return 0 if result.get("sent") else 2
+
     if args.command == "process-knowledge-pipeline":
         started_at = datetime.now(UTC).isoformat()
         run_id = "kb_run_" + started_at.replace(":", "").replace("-", "").replace(".", "")
@@ -584,6 +639,15 @@ def main(argv: list[str] | None = None) -> int:
             finished_at=finished_at,
         )
         output = {"run_id": run_id, "status": status, "summary": summary}
+        if status == "error":
+            output["telegram_alert"] = send_knowledge_alert(
+                settings,
+                format_failure_alert(
+                    operation="process_knowledge_pipeline",
+                    status=status,
+                    details=json.dumps(summary, ensure_ascii=False, indent=2),
+                ),
+            )
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if status == "success" else 1
 

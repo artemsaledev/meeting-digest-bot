@@ -2,6 +2,7 @@
 Description=MeetingDigestBot Notion back-import proposal check
 After=network-online.target meeting-digest-bot-api.service
 Wants=network-online.target
+OnFailure=meeting-digest-bot-alert@%n.service
 
 [Service]
 Type=oneshot

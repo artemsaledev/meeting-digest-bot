@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .config import Settings
@@ -37,6 +38,9 @@ class KnowledgeNotionImportRequest(BaseModel):
 class KnowledgeRagQueryRequest(BaseModel):
     query: str
     limit: int = 5
+    system: str | None = None
+    object_type: str | None = None
+    threshold: float = 0.0
 
 
 @app.get("/health")
@@ -64,6 +68,12 @@ def _knowledge_vector_store() -> KnowledgeVectorStore:
     )
 
 
+def _require_admin_token(x_meeting_digest_admin_token: str | None = Header(default=None)) -> None:
+    expected = settings.api_admin_token
+    if expected and x_meeting_digest_admin_token != expected:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
 @app.post("/publications/register")
 def register_publication(
     payload: PublicationRegistrationRequest,
@@ -88,16 +98,16 @@ def ask_knowledge(q: str, limit: int = 5) -> dict:
 
 
 @app.get("/knowledge/rag/search")
-def search_knowledge_rag(q: str, limit: int = 5) -> dict:
+def search_knowledge_rag(q: str, limit: int = 5, system: str | None = None, object_type: str | None = None, threshold: float = 0.0) -> dict:
     client = client_from_env(dict(os.environ))
     if not client:
         raise HTTPException(status_code=400, detail="KNOWLEDGE_RAG_API_KEY, OPENAI_API_KEY, or LLM_API_KEY is required.")
-    results = _knowledge_vector_store().search(q, client=client, limit=limit)
+    results = _knowledge_vector_store().search(q, client=client, limit=limit, system=system, object_type=object_type, threshold=threshold)
     return {"ok": True, "results": results}
 
 
 @app.post("/knowledge/rag/ask")
-def ask_knowledge_rag(payload: KnowledgeRagQueryRequest) -> dict:
+def ask_knowledge_rag(payload: KnowledgeRagQueryRequest, _: None = Depends(_require_admin_token)) -> dict:
     client = client_from_env(dict(os.environ), require_llm=True)
     if not client:
         raise HTTPException(status_code=400, detail="KNOWLEDGE_RAG_API_KEY, OPENAI_API_KEY, or LLM_API_KEY is required.")
@@ -106,6 +116,9 @@ def ask_knowledge_rag(payload: KnowledgeRagQueryRequest) -> dict:
         embedding_client=client,
         chat_client=client,
         limit=payload.limit,
+        system=payload.system,
+        object_type=payload.object_type,
+        threshold=payload.threshold,
     )
     return {"ok": True, "result": result}
 
@@ -113,6 +126,91 @@ def ask_knowledge_rag(payload: KnowledgeRagQueryRequest) -> dict:
 @app.get("/knowledge/rag/stats")
 def knowledge_rag_stats() -> dict:
     return {"ok": True, "stats": _knowledge_vector_store().stats()}
+
+
+def _knowledge_admin_status() -> dict:
+    repo = _knowledge_repo()
+    counts = {
+        name: len(list((repo.root / rel).glob("*.json"))) - len(list((repo.root / rel).glob("*.notion.json")))
+        for name, rel in {
+            "task_cases": "knowledge/task_cases",
+            "systems": "knowledge/systems",
+            "features": "knowledge/features",
+            "instructions": "knowledge/instructions",
+        }.items()
+    }
+    proposals = repo.list_revision_metadata(status="draft")
+    return {
+        "knowledge_dir": str(repo.root),
+        "counts": counts,
+        "rag": _knowledge_vector_store().stats(),
+        "draft_proposals": len(proposals),
+        "draft_proposal_items": [
+            {
+                "object_id": item.get("object_id"),
+                "source": item.get("source") or "revision",
+                "status": item.get("status"),
+                "metadata_path": item.get("_metadata_path"),
+            }
+            for item in proposals[:20]
+        ],
+        "latest_runs": service.state.list_kb_runs(limit=5),
+        "exports": {
+            "notebooklm_zip": str(repo.root / "exports" / "notebooklm.zip"),
+            "notebooklm_zip_exists": (repo.root / "exports" / "notebooklm.zip").exists(),
+        },
+    }
+
+
+@app.get("/knowledge/admin/status")
+def knowledge_admin_status(_: None = Depends(_require_admin_token)) -> dict:
+    return {"ok": True, "status": _knowledge_admin_status()}
+
+
+@app.get("/knowledge/admin", response_class=HTMLResponse)
+def knowledge_admin_dashboard(_: None = Depends(_require_admin_token)) -> str:
+    status = _knowledge_admin_status()
+    rows = []
+    for item in status["draft_proposal_items"]:
+        rows.append(
+            f"<tr><td>{item.get('object_id')}</td><td>{item.get('source')}</td><td>{item.get('status')}</td><td><code>{item.get('metadata_path')}</code></td></tr>"
+        )
+    run_rows = []
+    for item in status["latest_runs"]:
+        run_rows.append(f"<tr><td>{item.get('operation')}</td><td>{item.get('status')}</td><td>{item.get('finished_at')}</td></tr>")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Knowledge Base Admin</title>
+        <style>
+          body {{ font-family: Arial, sans-serif; margin: 32px; line-height: 1.45; }}
+          code, pre {{ background: #f5f5f5; padding: 2px 4px; border-radius: 4px; }}
+          table {{ border-collapse: collapse; width: 100%; margin: 16px 0 28px; }}
+          th, td {{ border-bottom: 1px solid #ddd; text-align: left; padding: 8px; vertical-align: top; }}
+          .grid {{ display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px; }}
+          .metric {{ border: 1px solid #ddd; border-radius: 8px; padding: 12px; }}
+        </style>
+      </head>
+      <body>
+        <h1>Knowledge Base Admin</h1>
+        <p><strong>Repo:</strong> <code>{status['knowledge_dir']}</code></p>
+        <div class="grid">
+          <div class="metric"><strong>Task cases</strong><br>{status['counts']['task_cases']}</div>
+          <div class="metric"><strong>Systems</strong><br>{status['counts']['systems']}</div>
+          <div class="metric"><strong>Features</strong><br>{status['counts']['features']}</div>
+          <div class="metric"><strong>Instructions</strong><br>{status['counts']['instructions']}</div>
+        </div>
+        <h2>RAG</h2>
+        <pre>{status['rag']}</pre>
+        <h2>Draft Proposals ({status['draft_proposals']})</h2>
+        <table><tr><th>Object</th><th>Source</th><th>Status</th><th>Metadata</th></tr>{''.join(rows) or '<tr><td colspan="4">No draft proposals</td></tr>'}</table>
+        <h2>Latest Runs</h2>
+        <table><tr><th>Operation</th><th>Status</th><th>Finished</th></tr>{''.join(run_rows) or '<tr><td colspan="3">No runs</td></tr>'}</table>
+      </body>
+    </html>
+    """
 
 
 @app.get("/knowledge/object/{object_id}")
@@ -140,7 +238,7 @@ def get_machine_bundle(object_id: str) -> dict:
 
 
 @app.post("/knowledge/revisions")
-def create_knowledge_revision(payload: KnowledgeRevisionRequest) -> dict:
+def create_knowledge_revision(payload: KnowledgeRevisionRequest, _: None = Depends(_require_admin_token)) -> dict:
     proposal = _knowledge_repo().create_revision_proposal(
         object_id=payload.object_id,
         correction=payload.correction,
@@ -149,7 +247,7 @@ def create_knowledge_revision(payload: KnowledgeRevisionRequest) -> dict:
 
 
 @app.post("/knowledge/revisions/status")
-def set_knowledge_revision_status(payload: KnowledgeRevisionStatusRequest) -> dict:
+def set_knowledge_revision_status(payload: KnowledgeRevisionStatusRequest, _: None = Depends(_require_admin_token)) -> dict:
     if payload.status not in {"draft", "approved", "rejected"}:
         raise HTTPException(status_code=400, detail="Invalid revision status")
     proposal = _knowledge_repo().set_revision_status(
@@ -160,19 +258,19 @@ def set_knowledge_revision_status(payload: KnowledgeRevisionStatusRequest) -> di
 
 
 @app.post("/knowledge/revisions/apply")
-def apply_knowledge_revision(payload: KnowledgeRevisionStatusRequest) -> dict:
+def apply_knowledge_revision(payload: KnowledgeRevisionStatusRequest, _: None = Depends(_require_admin_token)) -> dict:
     proposal = _knowledge_repo().apply_revision(metadata_path=Path(payload.metadata_path))
     return {"ok": True, "proposal": proposal.model_dump()}
 
 
 @app.post("/knowledge/notion/apply")
-def apply_notion_import(payload: KnowledgeRevisionStatusRequest) -> dict:
+def apply_notion_import(payload: KnowledgeRevisionStatusRequest, _: None = Depends(_require_admin_token)) -> dict:
     proposal = _knowledge_repo().apply_notion_import(metadata_path=Path(payload.metadata_path))
     return {"ok": True, "proposal": proposal.model_dump()}
 
 
 @app.post("/knowledge/notion/import")
-def import_notion_edits(payload: KnowledgeNotionImportRequest) -> dict:
+def import_notion_edits(payload: KnowledgeNotionImportRequest, _: None = Depends(_require_admin_token)) -> dict:
     result = _knowledge_repo().notion_import_proposals(
         env=dict(os.environ),
         database=payload.database,

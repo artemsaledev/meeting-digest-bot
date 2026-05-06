@@ -353,6 +353,52 @@ class KnowledgeRepository:
             status=status,
         )
 
+    def list_revision_metadata(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        items = []
+        for path in self._revision_metadata_paths():
+            data = self._read_json(path)
+            if not data:
+                continue
+            if status and data.get("status") != status:
+                continue
+            data["_metadata_path"] = str(path)
+            items.append(data)
+        items.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+        return items
+
+    def resolve_revision_metadata(self, token: str) -> Path | None:
+        needle = self._safe_slug(token)
+        for path in self._revision_metadata_paths():
+            data = self._read_json(path)
+            candidates = {
+                self._safe_slug(str(data.get("object_id") or "")),
+                self._safe_slug(path.stem),
+                self._safe_slug(path.name),
+            }
+            proposal_path = str(data.get("proposal_path") or "")
+            if proposal_path:
+                candidates.add(self._safe_slug(Path(proposal_path).stem))
+                candidates.add(self._safe_slug(Path(proposal_path).name))
+            if needle in candidates:
+                return path
+        return None
+
+    def revision_diff_text(self, *, metadata_path: Path, max_chars: int = 3200) -> str:
+        data = self._read_json(metadata_path)
+        if not data:
+            raise FileNotFoundError(f"Revision metadata is not found: {metadata_path}")
+        proposal_path = Path(str(data.get("proposal_path") or ""))
+        if not proposal_path.exists():
+            raise FileNotFoundError(f"Revision proposal is not found: {proposal_path}")
+        text = proposal_path.read_text(encoding="utf-8")
+        marker = "```diff\n"
+        start = text.find(marker)
+        if start >= 0:
+            end = text.find("\n```", start + len(marker))
+            if end >= 0:
+                text = text[start + len(marker) : end]
+        return text[:max_chars].strip()
+
     def apply_revision(self, *, metadata_path: Path) -> KnowledgeRevisionProposal:
         data = self._read_json(metadata_path)
         if not data:
@@ -426,6 +472,12 @@ class KnowledgeRepository:
             created_at=str(data.get("created_at") or ""),
             status="applied",
         )
+
+    def apply_resolved_revision(self, *, metadata_path: Path) -> KnowledgeRevisionProposal:
+        data = self._read_json(metadata_path)
+        if str(data.get("source") or "") == "notion_import":
+            return self.apply_notion_import(metadata_path=metadata_path)
+        return self.apply_revision(metadata_path=metadata_path)
 
     def generate_document(self, *, object_id: str, kind: str) -> KnowledgeGeneratedDocument:
         source_path = self._canonical_object_path(object_id)
@@ -637,6 +689,17 @@ class KnowledgeRepository:
                         }
                     )
                     continue
+                if self._looks_like_incomplete_notion_read(local_markdown, live_markdown):
+                    planned.append(
+                        {
+                            "action": "ignored_incomplete_live_page",
+                            "database": name,
+                            "object_id": page_object_id,
+                            "page_id": page.get("id"),
+                            "url": page.get("url"),
+                        }
+                    )
+                    continue
                 diff = self._notion_import_diff(
                     database=name,
                     object_id=page_object_id,
@@ -705,6 +768,14 @@ class KnowledgeRepository:
         for rel_dir in KNOWLEDGE_OBJECT_DIRS.values():
             paths.extend(sorted((self.root / rel_dir).glob("*.json")))
         return [path for path in paths if not path.name.endswith(".notion.json")]
+
+    def _revision_metadata_paths(self) -> list[Path]:
+        paths = []
+        drafts_dir = self.root / "knowledge" / "drafts"
+        if drafts_dir.exists():
+            paths.extend(sorted(drafts_dir.glob("*__revision_proposal.json")))
+            paths.extend(sorted((drafts_dir / "notion_import").glob("*__notion_import.json")))
+        return paths
 
     def _canonical_object_path(self, object_id: str) -> Path | None:
         for rel_dir in KNOWLEDGE_OBJECT_DIRS.values():
@@ -928,6 +999,23 @@ class KnowledgeRepository:
                 lineterm="",
             )
         )
+
+    @classmethod
+    def _looks_like_incomplete_notion_read(cls, local_markdown: str, live_markdown: str) -> bool:
+        local_lines = [line for line in cls._normalize_markdown(local_markdown).splitlines() if line.strip()]
+        live_lines = [line for line in cls._normalize_markdown(live_markdown).splitlines() if line.strip()]
+        if len(local_lines) < 6 or not live_lines:
+            return False
+        local_text = "\n".join(local_lines)
+        live_text = "\n".join(live_lines)
+        if len(live_text) >= len(local_text) * 0.65:
+            return False
+        first_heading = next((line for line in local_lines if line.startswith("# ")), "")
+        if first_heading and first_heading not in live_text:
+            return True
+        local_sections = {line for line in local_lines if line.startswith("## ")}
+        live_sections = {line for line in live_lines if line.startswith("## ")}
+        return bool(local_sections and len(live_sections) < max(1, len(local_sections) // 2))
 
     def _rewrite_object_artifacts(self, source_path: Path, data: dict[str, Any]) -> None:
         object_type = str(data.get("object_type") or "")

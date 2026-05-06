@@ -50,6 +50,12 @@ class KnowledgeRagTests(unittest.TestCase):
             self.assertTrue(results)
             self.assertEqual(results[0]["object_id"], "task_case__bitrix_123")
             self.assertIn("score", results[0])
+            self.assertIn("vector_score", results[0])
+            self.assertIn("lexical_score", results[0])
+
+            filtered = store.search("Bitrix checklist duplicate", client=client, limit=2, object_type="task_case")
+            self.assertTrue(filtered)
+            self.assertTrue(all(item["object_type"] == "task_case" for item in filtered))
 
             answer = store.answer("How does checklist sync work?", embedding_client=client, chat_client=client)
             self.assertEqual(answer["mode"], "rag")

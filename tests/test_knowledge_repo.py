@@ -91,6 +91,10 @@ class KnowledgeRepositoryTests(unittest.TestCase):
             text = Path(proposal.proposal_path).read_text(encoding="utf-8")
             self.assertIn("proposal only", text)
             self.assertIn("discussion__loom123", text)
+            listed = repo.list_revision_metadata(status="draft")
+            self.assertEqual(listed[0]["object_id"], "task_case__bitrix_123")
+            resolved = repo.resolve_revision_metadata("task_case__bitrix_123")
+            self.assertEqual(resolved, Path(proposal.metadata_path))
 
     def test_revision_can_be_approved_and_applied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,6 +227,31 @@ class KnowledgeRepositoryTests(unittest.TestCase):
             self.assertEqual(applied.status, "applied")
             data = json.loads((Path(tmp) / "knowledge" / "task_cases" / "task_case__bitrix_123.json").read_text(encoding="utf-8"))
             self.assertEqual(data["current_requirements"], ["Edited in Notion"])
+
+    def test_notion_import_ignores_obviously_incomplete_live_page(self) -> None:
+        class FakeClient:
+            def query_pages(self) -> list[dict]:
+                return [{"id": "page1", "url": "https://notion.local/page1"}]
+
+            def page_to_projection(self, page: dict, *, database: str) -> dict:
+                return {
+                    "database": database,
+                    "page_id": page["id"],
+                    "url": page["url"],
+                    "properties": {"ID": "task_case__bitrix_123", "Title": "Bitrix checklist sync"},
+                    "content_markdown": "- One tail bullet only\n",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            result = repo.notion_import_proposals(
+                env={},
+                database="Task Cases",
+                clients={"Task Cases": FakeClient()},
+            )
+            self.assertEqual(result.proposals_count, 0)
+            self.assertTrue(any(item["action"] == "ignored_incomplete_live_page" for item in result.planned_pages))
 
     def test_generate_document_writes_grounded_draft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -105,6 +105,7 @@ class Settings:
     telegram_report_chat_id: str | None
     knowledge_alert_chat_id: str | None
     meeting_digest_shared_secret: str | None
+    api_admin_token: str | None
     matching_task_limit: int
     matching_score_threshold: float
     weekly_llm_enabled: bool
@@ -167,6 +168,7 @@ class Settings:
             telegram_report_chat_id=get_value("TELEGRAM_REPORT_CHAT_ID"),
             knowledge_alert_chat_id=get_value("KNOWLEDGE_ALERT_CHAT_ID") or get_value("TELEGRAM_REPORT_CHAT_ID"),
             meeting_digest_shared_secret=get_value("MEETING_DIGEST_SHARED_SECRET"),
+            api_admin_token=get_value("MEETING_DIGEST_API_ADMIN_TOKEN"),
             matching_task_limit=int(str(get_value("MEETING_DIGEST_MATCHING_TASK_LIMIT", "50"))),
             matching_score_threshold=_parse_float(get_value("MEETING_DIGEST_MATCHING_SCORE_THRESHOLD"), 0.42),
             weekly_llm_enabled=_parse_bool(get_value("MEETING_DIGEST_WEEKLY_LLM_ENABLED"), False),

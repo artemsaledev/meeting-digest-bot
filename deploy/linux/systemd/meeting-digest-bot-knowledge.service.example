@@ -1,6 +1,7 @@
 [Unit]
 Description=MeetingDigestBot knowledge pipeline
 After=network.target meeting-digest-bot-api.service
+OnFailure=meeting-digest-bot-alert@%n.service
 
 [Service]
 Type=oneshot

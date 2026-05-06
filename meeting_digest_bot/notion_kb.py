@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Any
 
 import requests
@@ -331,16 +332,27 @@ class NotionKnowledgeClient:
         return "\n".join(line.strip() for line in str(value or "").splitlines() if line.strip())
 
     def _request(self, method: str, path: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = requests.request(
-            method,
-            NOTION_API_BASE + path,
-            headers=self.headers,
-            json=json,
-            timeout=30,
-        )
-        if response.status_code >= 400:
-            raise RuntimeError(f"Notion API {method} {path} failed: {response.status_code} {response.text[:1000]}")
-        return response.json()
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                response = requests.request(
+                    method,
+                    NOTION_API_BASE + path,
+                    headers=self.headers,
+                    json=json,
+                    timeout=45,
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    last_error = RuntimeError(f"Notion API {method} {path} failed: {response.status_code} {response.text[:1000]}")
+                    time.sleep(min(2 * attempt, 8))
+                    continue
+                if response.status_code >= 400:
+                    raise RuntimeError(f"Notion API {method} {path} failed: {response.status_code} {response.text[:1000]}")
+                return response.json()
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                time.sleep(min(2 * attempt, 8))
+        raise RuntimeError(f"Notion API {method} {path} failed after retries: {last_error}")
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:

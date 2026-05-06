@@ -65,3 +65,14 @@ def format_notion_import_alert(result: Any) -> str:
     if len(proposals) > 10:
         lines.append(f"...и еще {len(proposals) - 10}")
     return "\n".join(lines).strip()
+
+
+def format_failure_alert(*, operation: str, status: str = "error", details: str = "") -> str:
+    lines = [
+        "Knowledge Base: pipeline failure",
+        f"Operation: {operation}",
+        f"Status: {status}",
+    ]
+    if details:
+        lines.extend(["", details[:2500]])
+    return "\n".join(lines).strip()

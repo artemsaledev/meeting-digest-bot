@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any, Protocol
 
@@ -141,14 +142,31 @@ class KnowledgeVectorStore:
             "model": self.embeddings_model,
         }
 
-    def search(self, query: str, *, client: EmbeddingClient, limit: int = 5) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        *,
+        client: EmbeddingClient,
+        limit: int = 5,
+        system: str | None = None,
+        object_type: str | None = None,
+        threshold: float = 0.0,
+    ) -> list[dict[str, Any]]:
         self._init_db()
         query_vector = client.embed_texts([query])[0]
+        query_tokens = self._tokens(query)
         rows = self._all_embeddings()
         results = []
         for row in rows:
-            score = self._cosine(query_vector, row["embedding"])
-            results.append({**row["metadata"], "score": score})
+            metadata = row["metadata"]
+            if not self._metadata_matches(metadata, system=system, object_type=object_type):
+                continue
+            vector_score = self._cosine(query_vector, row["embedding"])
+            lexical_score = self._lexical_score(query_tokens, str(metadata.get("content") or ""))
+            score = vector_score + (0.15 * lexical_score)
+            if score < threshold:
+                continue
+            results.append({**metadata, "score": score, "vector_score": vector_score, "lexical_score": lexical_score})
         results.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
         return results[:limit]
 
@@ -160,8 +178,18 @@ class KnowledgeVectorStore:
         chat_client: ChatClient,
         limit: int = 5,
         model: str | None = None,
+        system: str | None = None,
+        object_type: str | None = None,
+        threshold: float = 0.0,
     ) -> dict[str, Any]:
-        contexts = self.search(query, client=embedding_client, limit=limit)
+        contexts = self.search(
+            query,
+            client=embedding_client,
+            limit=limit,
+            system=system,
+            object_type=object_type,
+            threshold=threshold,
+        )
         if not contexts:
             return {
                 "answer": "No relevant knowledge chunks found.",
@@ -249,6 +277,8 @@ class KnowledgeVectorStore:
                 "content": str(chunk.get("content") or ""),
                 "source_event_ids": chunk.get("source_event_ids") or [],
             }
+            metadata["object_type"] = self._infer_object_type(metadata["object_id"])
+            metadata["system"] = self._infer_system(metadata["object_id"], metadata["path"])
             rows.append(
                 (
                     metadata["chunk_id"],
@@ -318,6 +348,51 @@ class KnowledgeVectorStore:
         if not left_norm or not right_norm:
             return 0.0
         return dot / (left_norm * right_norm)
+
+    @staticmethod
+    def _tokens(text: str) -> set[str]:
+        return {token for token in re.findall(r"[\wА-Яа-яІіЇїЄєҐґ]{3,}", str(text).casefold(), flags=re.UNICODE)}
+
+    @classmethod
+    def _lexical_score(cls, query_tokens: set[str], content: str) -> float:
+        if not query_tokens:
+            return 0.0
+        content_tokens = cls._tokens(content)
+        if not content_tokens:
+            return 0.0
+        return len(query_tokens & content_tokens) / len(query_tokens)
+
+    @staticmethod
+    def _infer_object_type(object_id: str) -> str:
+        if object_id.startswith("task_case__"):
+            return "task_case"
+        if object_id.startswith("system__"):
+            return "system"
+        if object_id.startswith("feature__"):
+            return "feature"
+        if object_id.startswith("instruction__"):
+            return "instruction"
+        return "unknown"
+
+    @staticmethod
+    def _infer_system(object_id: str, path: str) -> str:
+        parts = object_id.split("__")
+        if len(parts) >= 2 and parts[0] in {"system", "feature", "instruction"}:
+            return parts[1]
+        path_lower = path.casefold()
+        if "bitrix" in object_id.casefold() or "bitrix" in path_lower:
+            return "bitrix"
+        if "aicallorder" in object_id.casefold() or "aicallorder" in path_lower:
+            return "aicallorder"
+        return "unknown"
+
+    @staticmethod
+    def _metadata_matches(metadata: dict[str, Any], *, system: str | None, object_type: str | None) -> bool:
+        if system and str(metadata.get("system") or "").casefold() != system.casefold():
+            return False
+        if object_type and str(metadata.get("object_type") or "").casefold() != object_type.casefold():
+            return False
+        return True
 
 
 def client_from_env(env: dict[str, str], *, require_llm: bool = False) -> ExternalAIClient | None:
