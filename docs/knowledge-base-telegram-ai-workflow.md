@@ -213,6 +213,24 @@ Audio support should reuse the existing external AI token/provider used for
 transcription and summarization. The bot should store only the transcript and
 result metadata needed for traceability.
 
+## Implemented First Layer
+
+The first Telegram AI layer is implemented on top of the existing command
+backend:
+
+- natural bot mentions can be routed into knowledge intents;
+- `kb instruction`, `kb spec`, and `kb export` are available as explicit command
+  aliases;
+- inline buttons are returned with knowledge answers;
+- callback buttons can run `Ask`, `Instruction`, `Spec`, `Export`, `Proposals`,
+  and `Health` against the replied original request;
+- export requests can attach the generated zip file to Telegram;
+- voice/audio messages are downloaded from Telegram and sent to the configured
+  external AI transcription endpoint before intent handling.
+
+The current classifier is rule-based. It can be replaced later with the
+orchestrator prompt above while keeping the same intent handlers.
+
 ## Product Principle
 
 The knowledge base should feel like a working memory in Telegram:

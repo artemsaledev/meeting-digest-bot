@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 import os
 from pathlib import Path
 import re
+import tempfile
 from zoneinfo import ZoneInfo
 
 import requests
@@ -61,10 +62,16 @@ class TelegramBotFacade:
         return f"https://api.telegram.org/bot{self.token}/"
 
     def process_update(self, update: dict) -> TelegramResponse:
+        callback_response = self._process_callback_query(update.get("callback_query") or {})
+        if callback_response:
+            return callback_response
+
         message = update.get("message") or update.get("channel_post") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         text = self._normalize_text(message.get("text") or message.get("caption") or "")
+        if not text and (message.get("voice") or message.get("audio")):
+            text = self._transcribe_telegram_audio(message)
         if not text:
             return TelegramResponse(
                 ok=False,
@@ -93,6 +100,21 @@ class TelegramBotFacade:
             if chat_id:
                 self.send_message(chat_id, kb_response.text)
             return kb_response
+
+        kb_ai_response = self._process_knowledge_ai_request(text, message=message)
+        if kb_ai_response:
+            if chat_id:
+                attachment = kb_ai_response.payload.get("attachment_path")
+                if attachment:
+                    self.send_document(chat_id, str(attachment), caption=kb_ai_response.text[:1000])
+                else:
+                    self.send_message(
+                        chat_id,
+                        kb_ai_response.text,
+                        reply_to_message_id=message.get("message_id"),
+                        reply_markup=self._knowledge_action_keyboard(),
+                    )
+            return kb_ai_response
 
         if self._is_register_command(text):
             response = self._register_publication_from_reply(message)
@@ -213,6 +235,43 @@ class TelegramBotFacade:
             payload=result.model_dump(),
         )
 
+    def _process_callback_query(self, callback: dict) -> TelegramResponse | None:
+        if not callback:
+            return None
+        data = str(callback.get("data") or "")
+        if not data.startswith("kb:"):
+            return None
+        callback_id = callback.get("id")
+        if callback_id:
+            self._answer_callback_query(str(callback_id))
+        message = callback.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        action = data.split(":", 1)[1]
+        if action == "menu":
+            response = TelegramResponse(ok=True, text=self._knowledge_menu_text(), payload={"intent": "menu"})
+        else:
+            original = message.get("reply_to_message") or {}
+            query = self._normalize_text(original.get("text") or original.get("caption") or "")
+            if not query:
+                query = self._normalize_text(message.get("text") or message.get("caption") or "")
+            query = self._strip_bot_mention(query)
+            if not query:
+                response = TelegramResponse(
+                    ok=False,
+                    text="Не вижу исходный запрос. Напишите или наговорите его еще раз и выберите действие.",
+                    payload={"intent": action},
+                )
+            else:
+                response = self._run_knowledge_intent(action, query)
+        if chat_id:
+            attachment = response.payload.get("attachment_path")
+            if attachment:
+                self.send_document(chat_id, str(attachment), caption=response.text[:1000])
+            else:
+                self.send_message(chat_id, response.text, reply_markup=self._knowledge_action_keyboard())
+        return response
+
     def _process_kb_command(self, text: str) -> TelegramResponse | None:
         command_text = self._strip_bot_mention(text).strip()
         match = re.match(r"^(?:/)?kb(?:\s+|$)(.*)$", command_text, flags=re.IGNORECASE | re.DOTALL)
@@ -269,24 +328,20 @@ class TelegramBotFacade:
                 question = args[len(parts[0]) :].strip() if parts else ""
                 if not question:
                     return TelegramResponse(ok=False, text="Usage: kb ask <question>")
-                client = client_from_env(dict(os.environ), require_llm=True)
-                if client:
-                    store = KnowledgeVectorStore(
-                        repo.root,
-                        db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
-                        embeddings_model=client.embeddings_model,
-                    )
-                    result = store.answer(question, embedding_client=client, chat_client=client, limit=5, min_score=0.18)
-                else:
-                    result = repo.ask(question, limit=5)
-                sources = result.get("sources") or []
-                source_lines = []
-                for item in sources[:3]:
-                    source_lines.append(f"- {item.get('object_id')} / {item.get('chunk_id') or item.get('score')}")
-                text = str(result.get("answer") or "")
-                if source_lines:
-                    text = text.strip() + "\n\nSources:\n" + "\n".join(source_lines)
-                return TelegramResponse(ok=True, text=text[:3900], payload={"sources_count": len(sources)})
+                return self._run_knowledge_intent("ask", question)
+            if action in {"instruction", "guide"}:
+                query = args[len(parts[0]) :].strip() if parts else ""
+                if not query:
+                    return TelegramResponse(ok=False, text="Usage: kb instruction <request>")
+                return self._run_knowledge_intent("instruction", query)
+            if action in {"spec", "tz", "тз"}:
+                query = args[len(parts[0]) :].strip() if parts else ""
+                if not query:
+                    return TelegramResponse(ok=False, text="Usage: kb spec <request>")
+                return self._run_knowledge_intent("spec", query)
+            if action == "export":
+                query = args[len(parts[0]) :].strip() if parts else ""
+                return self._run_knowledge_intent("export", query or "notebooklm")
         except Exception as exc:
             return TelegramResponse(ok=False, text=f"KB command failed: {exc}")
         return TelegramResponse(
@@ -297,18 +352,270 @@ class TelegramBotFacade:
             ),
         )
 
-    def send_message(self, chat_id: int | str, text: str) -> dict:
+    def _process_knowledge_ai_request(self, text: str, *, message: dict) -> TelegramResponse | None:
+        if not self._should_handle_knowledge_ai(text, message=message):
+            return None
+        query = self._strip_bot_mention(text).strip()
+        if not query:
+            return TelegramResponse(ok=True, text=self._knowledge_menu_text(), payload={"intent": "menu"})
+        intent = self._classify_knowledge_intent(query)
+        if intent == "menu":
+            return TelegramResponse(ok=True, text=self._knowledge_menu_text(), payload={"intent": "menu"})
+        return self._run_knowledge_intent(intent, query)
+
+    def _run_knowledge_intent(self, intent: str, query: str) -> TelegramResponse:
+        repo = KnowledgeRepository(Path(os.environ.get("KNOWLEDGE_REPO_PATH", "company-knowledge")))
+        if intent in {"health", "status"}:
+            pending = len(repo.list_revision_metadata(status="draft"))
+            rag = KnowledgeVectorStore(repo.root).stats()
+            quality = repo.quality_report()
+            return TelegramResponse(
+                ok=True,
+                text="\n".join(
+                    [
+                        "KB health:",
+                        f"- pending proposals: {pending}",
+                        f"- rag chunks: {rag.get('chunks_embedded', 0)}",
+                        f"- rag usage tokens: {(rag.get('usage') or {}).get('estimated_tokens', 0)}",
+                        f"- quality issues: {len(quality.issues)}",
+                    ]
+                ),
+                payload={"intent": "health", "pending_proposals": pending, "rag": rag},
+            )
+        if intent in {"proposals", "review_proposals"}:
+            items = repo.list_revision_metadata(status="draft")
+            if not items:
+                return TelegramResponse(ok=True, text="KB proposals: no draft proposals.", payload={"intent": "proposals", "count": 0})
+            lines = [f"KB proposals: {len(items)} draft"]
+            for item in items[:10]:
+                lines.append(f"- {item.get('object_id')} [{item.get('source') or 'revision'}] status={item.get('status')}")
+            return TelegramResponse(ok=True, text="\n".join(lines), payload={"intent": "proposals", "count": len(items)})
+        if intent in {"export", "export_bundle"}:
+            target = "agents" if any(marker in query.casefold() for marker in ["agent", "api", "machine"]) else "notebooklm"
+            result = repo.export_external_bundle(target=target)
+            zip_paths = [path for path in result.written_files if str(path).endswith(".zip")]
+            zip_path = zip_paths[-1] if zip_paths else ""
+            return TelegramResponse(
+                ok=True,
+                text=f"KB export готов: {target}. Objects: {result.objects_count}.",
+                payload={"intent": "export_bundle", "attachment_path": zip_path, "result": result.model_dump()},
+            )
+        if intent in {"revise", "revise_knowledge"}:
+            return self._create_knowledge_revision_from_query(repo, query)
+
+        answer_mode = {
+            "instruction": "user_instruction",
+            "generate_instruction": "user_instruction",
+            "spec": "technical_spec",
+            "generate_spec": "technical_spec",
+            "support": "support_answer",
+        }.get(intent, "general")
+        result = self._answer_from_knowledge(repo, query, answer_mode=answer_mode)
+        sources = result.get("sources") or []
+        source_lines = []
+        for item in sources[:3]:
+            source_lines.append(f"- {item.get('object_id')} / {item.get('chunk_id') or item.get('score')}")
+        text = str(result.get("answer") or "")
+        if source_lines:
+            text = text.strip() + "\n\nSources:\n" + "\n".join(source_lines)
+        return TelegramResponse(
+            ok=True,
+            text=text[:3900],
+            payload={"intent": intent, "answer_mode": answer_mode, "sources_count": len(sources)},
+        )
+
+    def _answer_from_knowledge(self, repo: KnowledgeRepository, query: str, *, answer_mode: str) -> dict:
+        client = client_from_env(dict(os.environ), require_llm=True)
+        if client:
+            store = KnowledgeVectorStore(
+                repo.root,
+                db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
+                embeddings_model=client.embeddings_model,
+            )
+            return store.answer(query, embedding_client=client, chat_client=client, limit=5, min_score=0.18, answer_mode=answer_mode)
+        return repo.ask(query, limit=5)
+
+    def _create_knowledge_revision_from_query(self, repo: KnowledgeRepository, query: str) -> TelegramResponse:
+        result = self._answer_from_knowledge(repo, query, answer_mode="general")
+        task_case_id = ""
+        for item in result.get("sources") or []:
+            object_id = str(item.get("object_id") or "")
+            if object_id.startswith("task_case__"):
+                task_case_id = object_id
+                break
+        if not task_case_id:
+            return TelegramResponse(
+                ok=False,
+                text="Не нашел task_case для корректировки. Уточните систему, функциональность или object_id.",
+                payload={"intent": "revise_knowledge"},
+            )
+        proposal = repo.create_revision_proposal(object_id=task_case_id, correction=query)
+        text = "\n".join(
+            [
+                f"Создал draft proposal для `{proposal.object_id}`.",
+                "",
+                "Проверьте:",
+                f"kb diff {proposal.object_id}",
+                "",
+                "Дальше:",
+                f"kb approve {proposal.object_id}",
+                f"kb apply {proposal.object_id}",
+                f"kb reject {proposal.object_id}",
+            ]
+        )
+        return TelegramResponse(ok=True, text=text, payload={"intent": "revise_knowledge", "proposal": proposal.model_dump()})
+
+    @classmethod
+    def _should_handle_knowledge_ai(cls, text: str, *, message: dict) -> bool:
+        cleaned = cls._strip_bot_mention(text).strip()
+        lowered = cleaned.casefold()
+        if BOT_MENTION_RE.search(text) and any(
+            marker in lowered
+            for marker in [
+                "база",
+                "знани",
+                "инструкц",
+                "спецификац",
+                "notebook",
+                "rag",
+                "proposal",
+                "предлож",
+                "как работает",
+                "сформируй",
+                "экспорт",
+                "export",
+            ]
+        ):
+            return True
+        return cleaned.startswith(("?", "kb?"))
+
+    @staticmethod
+    def _classify_knowledge_intent(query: str) -> str:
+        lowered = query.casefold()
+        if not lowered or lowered in {"kb", "база знаний", "knowledge"}:
+            return "menu"
+        if any(marker in lowered for marker in ["health", "статус", "здоров", "состояние"]):
+            return "health"
+        if any(marker in lowered for marker in ["proposal", "предлож", "правк", "изменен"]):
+            if any(marker in lowered for marker in ["невер", "исправ", "обнов", "скоррект", "работает не", "wrong"]):
+                return "revise_knowledge"
+            return "proposals"
+        if any(marker in lowered for marker in ["notebook", "bundle", "архив", "zip", "external ai", "экспорт", "export"]):
+            return "export_bundle"
+        if any(marker in lowered for marker in ["инструкц", "гайд", "guide", "manual", "как пользоваться", "пошаг"]):
+            return "generate_instruction"
+        if any(marker in lowered for marker in ["тз", "spec", "спецификац", "acceptance", "критери", "implementation", "техничес"]):
+            return "generate_spec"
+        if any(marker in lowered for marker in ["невер", "исправ", "скоррект", "обнови знание", "wrong"]):
+            return "revise_knowledge"
+        return "ask"
+
+    @staticmethod
+    def _knowledge_menu_text() -> str:
+        return (
+            "KB AI: выберите действие кнопкой или напишите запрос обычным текстом.\n\n"
+            "Можно спросить, как работает функциональность, попросить инструкцию, ТЗ, export bundle или посмотреть proposals."
+        )
+
+    @staticmethod
+    def _knowledge_action_keyboard() -> dict:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "Ask", "callback_data": "kb:ask"},
+                    {"text": "Instruction", "callback_data": "kb:instruction"},
+                    {"text": "Spec", "callback_data": "kb:spec"},
+                ],
+                [
+                    {"text": "Export", "callback_data": "kb:export"},
+                    {"text": "Proposals", "callback_data": "kb:proposals"},
+                    {"text": "Health", "callback_data": "kb:health"},
+                ],
+            ]
+        }
+
+    def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        *,
+        reply_to_message_id: int | None = None,
+        reply_markup: dict | None = None,
+    ) -> dict:
+        payload = {
+            "chat_id": chat_id,
+            "text": text[:4000],
+            "disable_web_page_preview": True,
+        }
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         response = requests.post(
             self.api_url + "sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text[:4000],
-                "disable_web_page_preview": True,
-            },
+            json=payload,
             timeout=30,
         )
         response.raise_for_status()
         return response.json()
+
+    def send_document(self, chat_id: int | str, path: str, *, caption: str = "") -> dict:
+        with open(path, "rb") as handle:
+            response = requests.post(
+                self.api_url + "sendDocument",
+                data={"chat_id": chat_id, "caption": caption[:1000]},
+                files={"document": (Path(path).name, handle)},
+                timeout=120,
+            )
+        response.raise_for_status()
+        return response.json()
+
+    def _answer_callback_query(self, callback_query_id: str) -> None:
+        try:
+            requests.post(self.api_url + "answerCallbackQuery", json={"callback_query_id": callback_query_id}, timeout=10)
+        except Exception:
+            return
+
+    def _transcribe_telegram_audio(self, message: dict) -> str:
+        media = message.get("voice") or message.get("audio") or {}
+        file_id = media.get("file_id")
+        if not file_id:
+            return ""
+        try:
+            file_info = requests.get(self.api_url + "getFile", params={"file_id": file_id}, timeout=30)
+            file_info.raise_for_status()
+            file_path = ((file_info.json().get("result") or {}).get("file_path") or "").strip()
+            if not file_path:
+                return ""
+            download = requests.get(f"https://api.telegram.org/file/bot{self.token}/{file_path}", timeout=120)
+            download.raise_for_status()
+            return self._transcribe_audio_bytes(download.content, filename=Path(file_path).name)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _transcribe_audio_bytes(content: bytes, *, filename: str) -> str:
+        api_key = os.environ.get("KNOWLEDGE_RAG_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")
+        if not api_key or not content:
+            return ""
+        base_url = os.environ.get("KNOWLEDGE_RAG_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL") or "https://api.openai.com/v1"
+        model = os.environ.get("KNOWLEDGE_TRANSCRIPTION_MODEL") or os.environ.get("OPENAI_TRANSCRIPTION_MODEL") or "gpt-4o-mini-transcribe"
+        suffix = Path(filename or "voice.ogg").suffix or ".ogg"
+        with tempfile.NamedTemporaryFile(suffix=suffix) as handle:
+            handle.write(content)
+            handle.flush()
+            with open(handle.name, "rb") as audio:
+                response = requests.post(
+                    base_url.rstrip("/") + "/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data={"model": model},
+                    files={"file": (Path(filename or handle.name).name, audio)},
+                    timeout=180,
+                )
+        response.raise_for_status()
+        data = response.json()
+        return str(data.get("text") or "").strip()
 
     def _parse_command(self, text: str, message: dict | None = None) -> TelegramCommand:
         command_text = self._strip_bot_mention(text)
