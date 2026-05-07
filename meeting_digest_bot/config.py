@@ -108,6 +108,7 @@ class Settings:
     api_admin_token: str | None
     matching_task_limit: int
     matching_score_threshold: float
+    daily_pm_llm_enabled: bool
     weekly_llm_enabled: bool
     llm_api_key: str | None
     llm_base_url: str
@@ -126,12 +127,25 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         dotenv_values = _load_dotenv_file(Path.cwd() / ".env")
+        aicallorder_db_raw = (
+            os.environ.get("AICALLORDER_DB_PATH")
+            or dotenv_values.get("AICALLORDER_DB_PATH")
+            or str(_default_aicallorder_db())
+        )
+        aicallorder_env_path_raw = (
+            os.environ.get("AICALLORDER_ENV_PATH")
+            or dotenv_values.get("AICALLORDER_ENV_PATH")
+            or str(Path(aicallorder_db_raw).parent.parent / ".env")
+        )
+        aicallorder_dotenv_values = _load_dotenv_file(Path(aicallorder_env_path_raw))
 
         def get_value(key: str, default: str | None = None) -> str | None:
             if key in os.environ and os.environ[key] != "":
                 return os.environ[key]
             if key in dotenv_values and dotenv_values[key] != "":
                 return dotenv_values[key]
+            if key in aicallorder_dotenv_values and aicallorder_dotenv_values[key] != "":
+                return aicallorder_dotenv_values[key]
             return default
 
         webhook_base, json_suffix = _normalize_webhook_base(get_value("BITRIX_WEBHOOK_BASE"))
@@ -171,6 +185,7 @@ class Settings:
             api_admin_token=get_value("MEETING_DIGEST_API_ADMIN_TOKEN"),
             matching_task_limit=int(str(get_value("MEETING_DIGEST_MATCHING_TASK_LIMIT", "50"))),
             matching_score_threshold=_parse_float(get_value("MEETING_DIGEST_MATCHING_SCORE_THRESHOLD"), 0.42),
+            daily_pm_llm_enabled=_parse_bool(get_value("MEETING_DIGEST_DAILY_PM_LLM_ENABLED"), True),
             weekly_llm_enabled=_parse_bool(get_value("MEETING_DIGEST_WEEKLY_LLM_ENABLED"), False),
             llm_api_key=get_value("LLM_API_KEY") or get_value("OPENAI_API_KEY"),
             llm_base_url=str(get_value("LLM_BASE_URL") or get_value("OPENAI_BASE_URL") or "https://api.openai.com/v1"),

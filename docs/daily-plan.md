@@ -133,3 +133,42 @@ Weekly report should query daily plan tasks for a date range and summarize:
 - recurring blockers
 
 If a daily task was deleted and not recreated through the bot, the weekly report cannot find it by title and skips that day. If the daily task was recreated through the bot, the new `daily_plan` binding replaces the old task ID and the weekly report uses the new task.
+
+## PM Daily Checklist Layer
+
+Daily plan creation now has an optional LLM layer controlled by:
+
+```text
+MEETING_DIGEST_DAILY_PM_LLM_ENABLED=true
+LLM_API_KEY=<OpenAI-compatible API key>
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=<model>
+```
+
+If these values are empty in MeetingDigestBot `.env`, the service also checks `AICALLORDER_ENV_PATH` or, by default, the `.env` file next to `AICALLORDER_DB_PATH`. This allows the daily PM layer to reuse the existing AIcallorder LLM credentials without duplicating secrets.
+
+When enabled, the bot does not publish the raw transcript-like parser output directly. It first builds a PM operating checklist from the daily transcript, AI summary, and fallback parser result.
+
+The transcript is treated as the source of truth. The AI summary is used only as helper structure. If the summary says something is done, but the transcript has markers like `вроде`, `кажется`, `надо проверить`, `после daily обсудим`, `скину`, `найду`, the item is moved to `needs_verification`, `in_progress`, or `waiting_dependency`.
+
+The generated task description must contain these sections:
+
+```text
+1. Фокус дня
+2. Чеклист ПМа
+3. План по людям
+4. Зависимости / последовательности
+5. Требует подтверждения / ручной проверки
+6. Не закрыто / в работе
+7. Блокеры / риски
+8. Не потерять сегодня
+```
+
+CRM checklists are created in four layers:
+
+- `Чеклист ПМа`: PM follow-ups assigned to Artem Yavdokimenko, user ID `114736`.
+- `PM: Требует подтверждения`: manual verification points assigned to user ID `114736`.
+- `PM: Не потерять сегодня`: small follow-ups assigned to user ID `114736`.
+- Per-person checklist groups: normalized LLM `people_plan`, assigned through `people_directory.json`.
+
+If the LLM layer is disabled or unavailable, the bot falls back to the deterministic `daily_plan_v2` parser and adds a service note to the task comment.

@@ -10,11 +10,14 @@ from .aicallorder_db import AIcallorderRepository
 from .bitrix_client import BitrixClient
 from .completion_reports import CompletionReportBuilder, DailyCompletionReport
 from .config import Settings
+from .daily_pm_llm import DailyPMChecklistLLM, DailyPMLLMConfig
 from .daily_plan import DailyPlanV2Parser
 from .models import (
+    DailyPersonPlan,
+    DailyPlanItem,
     DailyReportRequest,
-    DailyRollup,
     DailyPlanSyncRequest,
+    DailyRollup,
     DaySyncRequest,
     DigestType,
     PostSyncRequest,
@@ -52,6 +55,16 @@ class MeetingDigestService:
             )
         )
         self.daily_plan_parser = DailyPlanV2Parser()
+        self.daily_pm_llm = DailyPMChecklistLLM(
+            DailyPMLLMConfig(
+                enabled=settings.daily_pm_llm_enabled,
+                api_key=settings.llm_api_key,
+                base_url=settings.llm_base_url,
+                model=settings.llm_model,
+                timeout_seconds=settings.llm_timeout_seconds,
+            ),
+            people=self.daily_plan_parser.people,
+        )
         self.completion_reports = CompletionReportBuilder()
 
     def register_publication(self, payload: PublicationRegistrationRequest):
@@ -158,6 +171,7 @@ class MeetingDigestService:
             meetings=meetings,
             team_name=payload.team_name,
         )
+        self._enhance_daily_plan_pm(plan=plan, meetings=meetings)
         draft = build_daily_plan_task_draft(plan=plan, default_tags=self.settings.bitrix_tags)
         source_type = "daily_plan"
         source_key = f"{payload.report_date.isoformat()}:{payload.team_name}"
@@ -168,6 +182,81 @@ class MeetingDigestService:
             action=payload.action,
             explicit_task_id=payload.task_id,
         )
+
+    def _enhance_daily_plan_pm(self, *, plan, meetings) -> None:
+        if not self.daily_pm_llm.config.usable:
+            plan.pm_generation_notes.append("PM daily checklist LLM disabled or not configured; fallback daily_plan_v2 used.")
+            return
+        try:
+            result = self.daily_pm_llm.enhance(
+                report_date=plan.report_date,
+                team_name=plan.team_name,
+                base_plan=plan,
+                meetings=meetings,
+            )
+        except Exception as exc:
+            plan.pm_generation_notes.append(f"PM daily checklist LLM failed: {type(exc).__name__}: {exc}")
+            return
+        if not result:
+            plan.pm_generation_notes.append("PM daily checklist LLM returned empty result; fallback daily_plan_v2 used.")
+            return
+        plan.pm_markdown = result.markdown
+        plan.pm_checklist = result.pm_checklist
+        plan.pm_needs_verification = result.needs_verification
+        plan.pm_dont_lose_today = result.dont_lose_today
+        plan.pm_generation_notes.extend(result.notes)
+        self._replace_daily_people_plan_from_pm_analysis(plan=plan, people_plan=result.people_plan)
+
+    def _replace_daily_people_plan_from_pm_analysis(self, *, plan, people_plan) -> None:
+        if not people_plan:
+            return
+
+        grouped: dict[int | str, DailyPersonPlan] = {}
+        for entry in people_plan:
+            if not isinstance(entry, dict):
+                continue
+            task = str(entry.get("task") or "").strip()
+            if not task:
+                continue
+            status = str(entry.get("status") or "todo").strip() or "todo"
+            if status == "done":
+                continue
+
+            raw_person_name = str(entry.get("person") or "").strip()
+            person = self.daily_plan_parser.people.find(raw_person_name)
+            person_name = person.full_name if person else raw_person_name or "Не удалось назначить ответственного"
+            bitrix_user_id = person.bitrix_user_id if person else None
+            key: int | str = bitrix_user_id or person_name
+            if key not in grouped:
+                grouped[key] = DailyPersonPlan(
+                    person_name=person_name,
+                    bitrix_user_id=bitrix_user_id,
+                )
+
+            dependency = str(entry.get("dependency") or "").strip()
+            title = task
+            if dependency:
+                title = f"{title} (зависит от: {dependency})"
+            if status and status != "todo":
+                title = f"{title} [{status}]"
+
+            item = DailyPlanItem(
+                title=title,
+                person_name=person_name,
+                bitrix_user_id=bitrix_user_id,
+                source_meeting_id=",".join(plan.source_meeting_ids) if plan.source_meeting_ids else None,
+                source_meeting_title="PM daily checklist",
+                item_type="blocked" if status == "blocked" else "plan",
+            )
+            if status == "blocked":
+                grouped[key].blockers.append(item)
+            else:
+                grouped[key].plan_items.append(item)
+
+        if grouped:
+            plan.people = list(grouped.values())
+            plan.unmatched_items = []
+            plan.review_notes.append("План по людям заменен нормализованным PM LLM-разбором.")
 
     def run_daily_report(self, payload: DailyReportRequest) -> SyncResult:
         source_type = "daily_plan_report"

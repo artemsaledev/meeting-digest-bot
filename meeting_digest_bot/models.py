@@ -181,6 +181,11 @@ class DailyPlan(BaseModel):
     team_name: str = "Bitrix Develop Team"
     source_meeting_ids: list[str] = Field(default_factory=list)
     summary: str = ""
+    pm_markdown: str = ""
+    pm_checklist: list[str] = Field(default_factory=list)
+    pm_needs_verification: list[str] = Field(default_factory=list)
+    pm_dont_lose_today: list[str] = Field(default_factory=list)
+    pm_generation_notes: list[str] = Field(default_factory=list)
     global_blockers: list[str] = Field(default_factory=list)
     completed_items: list[str] = Field(default_factory=list)
     decisions: list[str] = Field(default_factory=list)

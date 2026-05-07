@@ -13,6 +13,8 @@ or pipe-delimited pseudo-tables. If source data is structured, render it as:
   Field: value
 """.strip()
 
+PM_BITRIX_USER_ID = 114736
+
 
 def build_meeting_task_draft(
     *,
@@ -165,42 +167,89 @@ def build_daily_plan_task_draft(
     plan: DailyPlan,
     default_tags: list[str] | None = None,
 ) -> TaskDraft:
-    title = f"План дня {plan.report_date.strftime('%d.%m.%Y')} / {plan.team_name}"
-    description_parts = [
-        f"Дата: {plan.report_date.isoformat()}",
-        f"Команда: {plan.team_name}",
-    ]
-    if plan.source_meeting_ids:
-        description_parts.extend(["", "Источник #daily встреч", *_to_bullets(plan.source_meeting_ids)])
+    if plan.pm_markdown:
+        title = f"План дня ПМ по daily: {plan.report_date.strftime('%d.%m.%Y')} / {plan.team_name}"
+        description = plan.pm_markdown.strip()
+    else:
+        title = f"План дня {plan.report_date.strftime('%d.%m.%Y')} / {plan.team_name}"
+        description_parts = [
+            f"Дата: {plan.report_date.isoformat()}",
+            f"Команда: {plan.team_name}",
+        ]
+        if plan.source_meeting_ids:
+            description_parts.extend(["", "Источник #daily встреч", *_to_bullets(plan.source_meeting_ids)])
 
-    if plan.summary:
-        description_parts.extend(["", "Краткое резюме", _truncate_text(plan.summary, 1200)])
+        if plan.summary:
+            description_parts.extend(["", "Краткое резюме", _truncate_text(plan.summary, 1200)])
 
-    if plan.people:
-        description_parts.extend(["", "План по людям"])
-        for person_plan in plan.people:
-            if not person_plan.plan_items and not person_plan.blockers:
-                continue
-            description_parts.append(f"{person_plan.person_name} ({person_plan.bitrix_user_id or 'без Bitrix ID'})")
-            if person_plan.plan_items:
-                description_parts.extend(_to_bullets([item.title for item in person_plan.plan_items]))
-            if person_plan.blockers:
-                description_parts.append("Блокеры / зависимости:")
-                description_parts.extend(_to_bullets([item.title for item in person_plan.blockers]))
+        if plan.people:
+            description_parts.extend(["", "План по людям"])
+            for person_plan in plan.people:
+                if not person_plan.plan_items and not person_plan.blockers:
+                    continue
+                description_parts.append(f"{person_plan.person_name} ({person_plan.bitrix_user_id or 'без Bitrix ID'})")
+                if person_plan.plan_items:
+                    description_parts.extend(_to_bullets([item.title for item in person_plan.plan_items]))
+                if person_plan.blockers:
+                    description_parts.append("Блокеры / зависимости:")
+                    description_parts.extend(_to_bullets([item.title for item in person_plan.blockers]))
 
-    if plan.global_blockers:
-        description_parts.extend(["", "Общие блокеры / зависимости", *_to_bullets(plan.global_blockers)])
+        if plan.global_blockers:
+            description_parts.extend(["", "Общие блокеры / зависимости", *_to_bullets(plan.global_blockers)])
 
-    if plan.completed_items:
-        description_parts.extend(["", "Сделано / подтверждено на daily", *_to_bullets(plan.completed_items)])
+        if plan.completed_items:
+            description_parts.extend(["", "Сделано / подтверждено на daily", *_to_bullets(plan.completed_items)])
 
-    if plan.review_notes:
-        description_parts.extend(["", "Служебные заметки разбора", *_to_bullets(plan.review_notes)])
+        if plan.review_notes:
+            description_parts.extend(["", "Служебные заметки разбора", *_to_bullets(plan.review_notes)])
 
-    if plan.unmatched_items:
-        description_parts.extend(["", "Требует ручной проверки ответственного", *_to_bullets(plan.unmatched_items)])
+        if plan.unmatched_items:
+            description_parts.extend(["", "Требует ручной проверки ответственного", *_to_bullets(plan.unmatched_items)])
+        description = "\n".join(description_parts).strip()
 
     checklist_groups: list[ChecklistGroup] = []
+    if plan.pm_checklist:
+        checklist_groups.append(
+            ChecklistGroup(
+                title="Чеклист ПМа",
+                items=[
+                    ChecklistItem(
+                        title=item,
+                        members=[PM_BITRIX_USER_ID],
+                        meta={"item_type": "pm_follow_up"},
+                    )
+                    for item in plan.pm_checklist
+                ],
+            )
+        )
+    if plan.pm_needs_verification:
+        checklist_groups.append(
+            ChecklistGroup(
+                title="PM: Требует подтверждения",
+                items=[
+                    ChecklistItem(
+                        title=item,
+                        members=[PM_BITRIX_USER_ID],
+                        meta={"item_type": "pm_needs_verification"},
+                    )
+                    for item in plan.pm_needs_verification
+                ],
+            )
+        )
+    if plan.pm_dont_lose_today:
+        checklist_groups.append(
+            ChecklistGroup(
+                title="PM: Не потерять сегодня",
+                items=[
+                    ChecklistItem(
+                        title=item,
+                        members=[PM_BITRIX_USER_ID],
+                        meta={"item_type": "pm_dont_lose_today"},
+                    )
+                    for item in plan.pm_dont_lose_today
+                ],
+            )
+        )
     for person_plan in plan.people:
         items: list[ChecklistItem] = []
         for item in person_plan.plan_items:
@@ -228,19 +277,24 @@ def build_daily_plan_task_draft(
         comment_lines.append(f"Общих блокеров: {len(plan.global_blockers)}")
     if plan.unmatched_items:
         comment_lines.append(f"Требуют ручной проверки: {len(plan.unmatched_items)}")
+    if plan.pm_checklist:
+        comment_lines.append(f"PM follow-up пунктов: {len(plan.pm_checklist)}")
+    if plan.pm_generation_notes:
+        comment_lines.extend(["", "PM-слой", *_to_bullets(plan.pm_generation_notes)])
 
     return TaskDraft(
         title=title,
-        description="\n".join(description_parts).strip(),
+        description=description,
         comment="\n".join(comment_lines).strip(),
         checklist_groups=checklist_groups,
-        tags=list(dict.fromkeys(list(default_tags or []) + ["daily-plan", "daily-plan-v2"])),
+        tags=list(dict.fromkeys(list(default_tags or []) + ["daily-plan", "daily-plan-v2", "pm-daily-checklist"])),
         meta={
             "report_date": plan.report_date.isoformat(),
             "team_name": plan.team_name,
             "source_meeting_ids": plan.source_meeting_ids,
             "daily_plan": True,
             "daily_plan_parser": "v2",
+            "daily_pm_checklist": bool(plan.pm_markdown),
         },
     )
 
