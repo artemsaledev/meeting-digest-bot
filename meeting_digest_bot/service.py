@@ -362,11 +362,17 @@ class MeetingDigestService:
         source_key = f"{payload.week_from.isoformat()}:{payload.week_to.isoformat()}:{payload.team_name}"
         existing = self.state.get_task_binding(source_type=source_type, source_key=source_key)
         reports = self._build_daily_completion_reports_between(payload.week_from, payload.week_to, payload.team_name)
+        missing_dates = self._missing_daily_completion_dates(
+            payload.week_from,
+            payload.week_to,
+            reports,
+        )
         comment = self.completion_reports.format_weekly_comment(
             week_from=payload.week_from,
             week_to=payload.week_to,
             team_name=payload.team_name,
             reports=reports,
+            missing_dates=missing_dates,
         )
         telegram_result = None
         weekly_task_id = self._weekly_task_id(payload.week_from, payload.week_to)
@@ -382,6 +388,7 @@ class MeetingDigestService:
                 details=self._weekly_report_details(reports) | {
                     "reason": "already_reported",
                     "telegram_text": comment,
+                    "missing_dates": [item.isoformat() for item in missing_dates],
                 },
             )
 
@@ -402,6 +409,7 @@ class MeetingDigestService:
                     "week_from": payload.week_from.isoformat(),
                     "week_to": payload.week_to.isoformat(),
                     "team_name": payload.team_name,
+                    "missing_dates": [item.isoformat() for item in missing_dates],
                     "telegram": telegram_result,
                     "telegram_text": comment,
                 },
@@ -413,14 +421,20 @@ class MeetingDigestService:
             title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
             source_type=source_type,
             source_key=source_key,
-            details=self._weekly_report_details(reports) | {"telegram": telegram_result, "telegram_text": comment},
+            details=self._weekly_report_details(reports)
+            | {
+                "missing_dates": [item.isoformat() for item in missing_dates],
+                "telegram": telegram_result,
+                "telegram_text": comment,
+            },
         )
 
     def _build_daily_completion_report(self, report_date: date, team_name: str) -> DailyCompletionReport:
         task_id = self._daily_plan_task_id(report_date, team_name)
         if not task_id:
             raise ValueError(f"Daily plan task is not found for {report_date.isoformat()} / {team_name}.")
-        if not self._task_exists(task_id):
+        task = self._get_task_payload(task_id, select=["ID", "TITLE", "DESCRIPTION"])
+        if not task:
             raise ValueError(f"Daily plan task #{task_id} is not found or unavailable in CRM.")
         checklist_rows = self.bitrix.list_checklist_items(task_id)
         return self.completion_reports.build_daily(
@@ -428,6 +442,8 @@ class MeetingDigestService:
             team_name=team_name,
             task_id=task_id,
             task_url=self._task_url(task_id),
+            task_title=str(task.get("title") or task.get("TITLE") or ""),
+            task_description=str(task.get("description") or task.get("DESCRIPTION") or ""),
             checklist_rows=checklist_rows,
         )
 
@@ -446,6 +462,21 @@ class MeetingDigestService:
                 pass
             current += timedelta(days=1)
         return reports
+
+    @staticmethod
+    def _missing_daily_completion_dates(
+        week_from: date,
+        week_to: date,
+        reports: list[DailyCompletionReport],
+    ) -> list[date]:
+        found = {report.report_date for report in reports}
+        missing: list[date] = []
+        current = week_from
+        while current <= week_to:
+            if current not in found:
+                missing.append(current)
+            current += timedelta(days=1)
+        return missing
 
     def _daily_plan_task_id(self, report_date: date, team_name: str) -> int | None:
         binding = self.state.get_task_binding(
@@ -760,12 +791,20 @@ class MeetingDigestService:
         return bool(draft.meta.get("daily_plan"))
 
     def _get_task_description(self, task_id: int) -> str:
-        data = self.bitrix.get_task(task_id, select=["ID", "TITLE", "DESCRIPTION"])
+        task = self._get_task_payload(task_id, select=["ID", "TITLE", "DESCRIPTION"]) or {}
+        return str(task.get("description") or task.get("DESCRIPTION") or "").strip()
+
+    def _get_task_payload(self, task_id: int, select: list[str] | None = None) -> dict[str, Any] | None:
+        try:
+            data = self.bitrix.get_task(task_id, select=select or ["ID", "TITLE", "DESCRIPTION"])
+        except Exception:
+            return None
         result = data.get("result") or {}
         task = result.get("task") if isinstance(result, dict) else None
         if not isinstance(task, dict):
             task = result if isinstance(result, dict) else {}
-        return str(task.get("description") or task.get("DESCRIPTION") or "").strip()
+        task_id_value = task.get("id") or task.get("ID")
+        return task if task_id_value else None
 
     def _merge_task_description(
         self,
@@ -951,16 +990,7 @@ class MeetingDigestService:
         return f"https://totiscrm.com/workgroups/group/{self.settings.bitrix_group_id}/tasks/task/view/{task_id}/"
 
     def _task_exists(self, task_id: int) -> bool:
-        try:
-            data = self.bitrix.get_task(task_id, select=["ID", "TITLE"])
-        except Exception:
-            return False
-        result = data.get("result")
-        if isinstance(result, dict):
-            task = result.get("task") if isinstance(result.get("task"), dict) else result
-            task_id_value = task.get("id") or task.get("ID")
-            return bool(task_id_value)
-        return False
+        return self._get_task_payload(task_id, select=["ID", "TITLE"]) is not None
 
     def _find_task_matches(self, draft: TaskDraft) -> list[dict[str, Any]]:
         try:

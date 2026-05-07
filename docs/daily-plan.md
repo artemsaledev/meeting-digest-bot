@@ -124,15 +124,44 @@ Manual commands:
 
 ## Weekly Daily-Plan Report
 
-Weekly report should query daily plan tasks for a date range and summarize:
+Weekly report queries daily plan tasks for a date range and summarizes the week in the same PM-oriented style as daily plans.
 
-- completed daily checklist items
-- incomplete items from previous days
-- incomplete items still open next morning
-- responsible person for each incomplete item
-- recurring blockers
+It reads actual CRM checklist state, not the original transcript snapshot. If a user edits the checklist during the week, the weekly report uses the current CRM state.
+
+Weekly report includes:
+
+- execution summary: found daily tasks, total checklist items, closed items, open items, missing daily tasks
+- weekly focus extracted from daily task descriptions
+- closed checklist items by day and responsible person
+- open checklist items by day and responsible person
+- PM follow-up items from `Чеклист ПМа`, `PM: Требует подтверждения`, and `PM: Не потерять сегодня`
+- verification / risk items based on checklist group and item text
+- links to source daily tasks
 
 If a daily task was deleted and not recreated through the bot, the weekly report cannot find it by title and skips that day. If the daily task was recreated through the bot, the new `daily_plan` binding replaces the old task ID and the weekly report uses the new task.
+
+The weekly report format is intentionally not a meeting digest. It is a PM completion digest:
+
+```text
+Единый weekly PM-дайджест 04.05 - 08.05.2026
+Сводка выполнения
+Фокус недели по daily-планам
+Закрыто за неделю
+Не закрыто по дням
+PM follow-up / контроль ПМа
+Требует проверки / риски
+Daily-задачи не найдены
+Источники daily-задач
+```
+
+The report does not re-run the full daily LLM parser. It combines the already published daily task descriptions with current checklist status from Bitrix. This keeps the weekly report stable when the transcript was noisy but the PM later cleaned the task manually.
+
+Manual command examples:
+
+```text
+@LLMeets_bot итоги недели 2026-05-04 2026-05-08
+python -m meeting_digest_bot weekly-report --week-from 2026-05-04 --week-to 2026-05-08 --force
+```
 
 ## PM Daily Checklist Layer
 
