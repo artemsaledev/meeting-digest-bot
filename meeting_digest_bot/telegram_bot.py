@@ -190,13 +190,7 @@ class TelegramBotFacade:
                 payload=result.model_dump(),
             )
         elif command.post_url:
-            result = self.service.sync_post(
-                PostSyncRequest(
-                    post_url=command.post_url,
-                    action=action,
-                    task_id=command.task_id,
-                )
-            )
+            result = self._sync_post_command(command, action=action, message=message)
             response = TelegramResponse(
                 ok=True,
                 text=self._format_sync_result("поста", result),
@@ -683,34 +677,75 @@ class TelegramBotFacade:
             team_name=self._extract_team_name(command_text),
         )
 
+    def _sync_post_command(self, command: TelegramCommand, *, action: SyncAction, message: dict) -> object:
+        request = PostSyncRequest(
+            post_url=command.post_url or "",
+            action=action,
+            task_id=command.task_id,
+        )
+        try:
+            return self.service.sync_post(request)
+        except ValueError as exc:
+            error_message = str(exc)
+            if "Публикация не зарегистрирована" not in error_message and "register endpoint" not in error_message:
+                raise
+            record, error = self._register_publication_record_from_reply(message, post_url=command.post_url)
+            if not record:
+                raise ValueError(f"{exc} Авто-регистрация из reply не удалась: {error}") from exc
+            result = self.service.sync_post(request)
+            result.details["auto_registered_publication"] = True
+            result.details["registered_post_url"] = record.post_url
+            result.details["registered_loom_video_id"] = record.loom_video_id
+            return result
+
     def _register_publication_from_reply(self, message: dict) -> TelegramResponse:
-        reply = message.get("reply_to_message") or {}
-        reply_text = self._normalize_text(reply.get("text") or reply.get("caption") or "")
-        if not reply_text:
+        record, error = self._register_publication_record_from_reply(message)
+        if not record:
             return TelegramResponse(
                 ok=False,
-                text=(
+                text=error or (
                     "Для регистрации старого поста ответьте командой "
                     "`@LLMeets_bot зарегистрировать` именно на сообщение с Loom-дайджестом."
                 ),
             )
 
-        post_url = self._post_url_from_reply(message)
+        return TelegramResponse(
+            ok=True,
+            text=(
+                "Старый пост зарегистрирован.\n"
+                f"Источник: {record.post_url}\n"
+                f"Loom video ID: {record.loom_video_id}\n"
+                f"Заголовок: {record.meeting_title or '-'}\n\n"
+                "Теперь можно ответить на этот же пост или на это сообщение:\n"
+                "@LLMeets_bot preview\n"
+                "@LLMeets_bot создать\n"
+                "@LLMeets_bot обновить 168334"
+            ),
+            payload=record.model_dump(),
+        )
+
+    def _register_publication_record_from_reply(self, message: dict, *, post_url: str | None = None):
+        reply = message.get("reply_to_message") or {}
+        reply_text = self._normalize_text(reply.get("text") or reply.get("caption") or "")
+        if not reply_text:
+            return None, (
+                "Для регистрации старого поста ответьте командой "
+                "`@LLMeets_bot зарегистрировать` именно на сообщение с Loom-дайджестом."
+            )
+
+        resolved_post_url = post_url or self._post_url_from_reply(message)
         metadata = self._extract_publication_metadata(reply_text)
-        if not post_url:
-            return TelegramResponse(ok=False, text="Не удалось определить ссылку на пост из reply_to_message.")
+        if not resolved_post_url:
+            return None, "Не удалось определить ссылку на пост из reply_to_message."
         if not metadata.get("loom_video_id"):
-            return TelegramResponse(
-                ok=False,
-                text=(
-                    "Не нашел Loom-ссылку или Loom video ID в тексте старого поста. "
-                    "Ответьте командой на сам digest-пост, где есть строка Loom."
-                ),
+            return None, (
+                "Не нашел Loom-ссылку или Loom video ID в тексте старого поста. "
+                "Ответьте командой на сам digest-пост, где есть строка Loom."
             )
 
         record = self.service.register_publication(
             PublicationRegistrationRequest(
-                post_url=post_url,
+                post_url=resolved_post_url,
                 telegram_chat_id=str((message.get("chat") or {}).get("id") or ""),
                 telegram_message_id=str(reply.get("message_id") or ""),
                 digest_type=DigestType.meeting,
@@ -728,20 +763,7 @@ class TelegramBotFacade:
                 },
             )
         )
-        return TelegramResponse(
-            ok=True,
-            text=(
-                "Старый пост зарегистрирован.\n"
-                f"Источник: {record.post_url}\n"
-                f"Loom video ID: {record.loom_video_id}\n"
-                f"Заголовок: {record.meeting_title or '-'}\n\n"
-                "Теперь можно ответить на этот же пост или на это сообщение:\n"
-                "@LLMeets_bot preview\n"
-                "@LLMeets_bot создать\n"
-                "@LLMeets_bot обновить 168334"
-            ),
-            payload=record.model_dump(),
-        )
+        return record, None
 
     @staticmethod
     def _extract_publication_metadata(text: str) -> dict[str, object]:
