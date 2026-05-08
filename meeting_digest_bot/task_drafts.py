@@ -168,16 +168,16 @@ def build_daily_plan_task_draft(
     plan: DailyPlan,
     default_tags: list[str] | None = None,
 ) -> TaskDraft:
-    pm_checklist = _dedupe_text_items(plan.pm_checklist, limit=12)
+    pm_checklist = _dedupe_text_items(plan.pm_checklist, limit=8)
     pm_needs_verification = _dedupe_text_items(
         plan.pm_needs_verification,
         existing=pm_checklist,
-        limit=7,
+        limit=5,
     )
     pm_dont_lose_today = _dedupe_text_items(
         plan.pm_dont_lose_today,
         existing=pm_checklist + pm_needs_verification,
-        limit=6,
+        limit=4,
     )
 
     if plan.pm_markdown:

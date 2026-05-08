@@ -23,16 +23,18 @@ DAILY_PM_STATUSES = {
 }
 
 ANALYSIS_LIMITS = {
-    "focus_of_day": 7,
-    "people_plan": 12,
-    "pm_checklist": 12,
+    "focus_of_day": 5,
+    "people_plan": 18,
+    "pm_checklist": 8,
     "dependencies": 8,
-    "needs_verification": 7,
-    "in_progress": 10,
-    "blockers_and_risks": 8,
-    "dont_lose_today": 6,
+    "needs_verification": 5,
+    "in_progress": 8,
+    "blockers_and_risks": 6,
+    "dont_lose_today": 4,
     "source_conflicts": 6,
 }
+
+PEOPLE_TASKS_PER_PERSON_LIMIT = 3
 
 
 @dataclass(slots=True)
@@ -124,7 +126,10 @@ class DailyPMChecklistLLM:
             return None
         analysis = self._normalize_analysis(parsed)
         self._canonicalize_people_plan(analysis)
+        self._compact_people_plan(analysis)
         self._apply_domain_watchlist(analysis, payload)
+        self._filter_low_signal_pm_sections(analysis)
+        self._remove_pm_duplicates_with_people_plan(analysis)
         self._dedupe_cross_sections(analysis)
         self._limit_analysis_sections(analysis)
         return analysis
@@ -242,7 +247,7 @@ class DailyPMChecklistLLM:
     @staticmethod
     def _analysis_prompt() -> str:
         return """
-Ты анализируешь daily meeting для создания задачи дня для ПМа.
+Ты анализируешь #daily технической команды и создаешь основу для задачи "План дня".
 
 Входные данные:
 1. TRANSCRIPT - полный транскрипт встречи. Это источник истины.
@@ -256,36 +261,47 @@ class DailyPMChecklistLLM:
 follow-up или зависимость. Такие пункты нельзя относить к done.
 
 Цель:
-Сформировать не протокол встречи, а операционный PM daily checklist:
-что ПМ должен сегодня проверить, дожать, синхронизировать, зафиксировать, проконтролировать и не потерять.
+Сформировать не протокол встречи, а компактный план обязательств дня:
+1. `people_plan` - что конкретный участник команды обязался сделать / проверить / выкатить / протестировать / подготовить.
+2. `pm_checklist` - только управленческие действия ПМа, которые не являются прямой задачей исполнителя.
+3. `needs_verification` - ручные проверки результата, а не повтор задач людей.
+4. `dont_lose_today` - короткие напоминания, которые не дублируют другие разделы.
+
+Ключевой принцип:
+Чеклист человека = технический результат исполнителя.
+Чеклист ПМа = контроль стыков, зависимостей, демо, коммуникаций, фиксации решений.
+Не превращай каждую реплику ПМа "проверю / проконтролирую / уточню у X" в отдельный PM-пункт, если уже есть задача X.
 
 Выдели:
 1. Главные темы дня.
-2. Явные задачи по людям.
-3. Неявные PM-follow-up задачи.
+2. Явные обязательства по людям.
+3. Только настоящие PM-follow-up задачи.
 4. Зависимости и последовательности действий.
 5. Пункты, требующие подтверждения или ручной проверки.
 6. То, что в работе и не закрыто.
 7. Реальные блокеры и риски.
 8. Темы, которые легко потерять, но по ним нужен follow-up сегодня.
 
-Типовые PM-follow-up действия:
-- проверить статус;
-- синхронизироваться;
-- дождаться результата;
-- проконтролировать зависимость;
-- собрать материалы;
-- посмотреть демо;
-- зафиксировать решение;
-- запросить оценку;
-- уточнить владельца;
-- обновить задачу;
-- проверить, что проблема закрыта не только со слов, но и по факту.
+Как формулировать `people_plan`:
+- Пиши как исполнимое обязательство результата: "Доработать...", "Проверить...", "Протестировать...", "Перенести на прод...", "Подготовить инструкцию...".
+- Не копируй разговорные хвосты: "ну", "там", "вроде", "посмотрим", "если успею".
+- Не ставь одному человеку 5-10 микропунктов по одной теме. Объединяй до 1-3 содержательных задач на человека.
+- Если реплика звучит как план ПМа контролировать чужую работу, не назначай ее ПМу как персональное обязательство.
+- Если человек не найден в PEOPLE_DIRECTORY, не создавай ему отдельный чеклист. Перенеси это в PM-follow-up как уточнение владельца.
+- Если задача уже сделана на встрече, не добавляй ее в daily checklist; вынеси в `in_progress` или вообще пропусти, если это просто факт.
+
+Как формулировать `pm_checklist`:
+- Максимум 8 пунктов.
+- Только действия, которые должен сделать ПМ: организовать демо, согласовать окно релиза, собрать недельный дайджест, зафиксировать решение, синхронизировать владельцев, проверить критичный результат.
+- Не дублируй задачи людей в форме "проконтролировать работу Иванa". Если нужна проверка, сформулируй один агрегированный пункт по теме, а не по каждому человеку.
+- Избегай пустых пунктов вроде "созвониться с ответственными", "не потерять обсуждения", "обновить задачи" без конкретной темы.
 
 Ограничения объема и дублей:
-- `pm_checklist` — главный исполнимый список ПМа, максимум 12 пунктов.
-- `needs_verification` — только отдельные ручные проверки, максимум 7 пунктов; не копируй туда дословно пункты из `pm_checklist`.
-- `dont_lose_today` — короткие напоминания, максимум 6 пунктов; не копируй туда то же действие, что уже есть в `pm_checklist`.
+- `focus_of_day` — максимум 5 тем.
+- `people_plan` — максимум 18 задач суммарно и максимум 3 задачи на одного человека.
+- `pm_checklist` — максимум 8 пунктов.
+- `needs_verification` — максимум 5 пунктов; не копируй туда дословно пункты из `pm_checklist`.
+- `dont_lose_today` — максимум 4 пункта; не копируй туда то же действие, что уже есть в `pm_checklist`.
 - Не создавай отдельный PM-пункт для каждого упоминания темы. Объединяй близкие действия в один контрольный пункт.
 - Не дублируй одну тему в трех разделах: если она есть в `pm_checklist`, в дополнительных разделах оставляй только уточнение другого типа.
 
@@ -313,11 +329,11 @@ todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_
 
 Верни только JSON object без Markdown и пояснений:
 {
-  "focus_of_day": ["3-7 управленческих фокусов дня"],
+  "focus_of_day": ["3-5 фокусов дня"],
   "people_plan": [
     {
       "person": "имя человека",
-      "task": "нормализованная задача",
+      "task": "краткое обязательство технического результата",
       "status": "todo | in_progress | done | needs_verification | blocked | waiting_dependency | needs_estimation",
       "dependency": "от кого или чего зависит, если есть",
       "comment": "короткий контекст из transcript"
@@ -341,16 +357,17 @@ todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_
 Требования:
 1. Это рабочий PM-чеклист, а не протокол встречи.
 2. Используй чекбоксы только для действий ПМа и ручных проверок.
-3. Сохрани отдельный план по людям.
+3. Сохрани отдельный план по людям: 1-3 коротких обязательства на человека.
 4. Отдельно выдели зависимости и последовательности.
 5. Отдельно выдели пункты, требующие подтверждения.
 6. Не помещай в "Сделано" то, что имеет статус in_progress, needs_verification или waiting_dependency.
 7. Формулируй действия так, чтобы их можно было выполнить в течение дня.
-8. Не теряй мелкие follow-up: записи, комментарии, обещания "скину", "найду", "после daily обсудим".
+8. Не теряй важные follow-up, но не превращай каждую реплику в отдельную задачу.
 9. Не используй Markdown-таблицы: Bitrix плохо отображает таблицы в задачах.
-10. Пиши кратко, но с достаточным контекстом для контроля дня.
+10. Пиши кратко: задача должна быть емкой к обязательствам, а не длинной стенограммой.
 11. Не дублируй одни и те же действия в "Чеклист ПМа", "Требует подтверждения" и "Не потерять сегодня".
-12. Соблюдай лимиты: Фокус дня до 7 пунктов, Чеклист ПМа до 12, Требует подтверждения до 7, Не потерять сегодня до 6.
+12. Соблюдай лимиты: Фокус дня до 5 пунктов, Чеклист ПМа до 8, Требует подтверждения до 5, Не потерять сегодня до 4.
+13. Если задача человека уже есть в "План по людям", не повторяй ее как PM-контроль, кроме случаев реальной зависимости или демо.
 
 Структура Markdown:
 
@@ -374,7 +391,6 @@ todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_
 ## 3. План по людям
 ### {{person}}
 - **Задача:** ...
-- **Статус:** ...
 - **Зависит от:** ...
 - **Комментарий:** ...
 
@@ -414,15 +430,17 @@ todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_
 Checklist самопроверки:
 1. Есть ли отдельный блок "Чеклист ПМа"?
 2. Есть ли там действия ПМа, а не только задачи исполнителей?
-3. Не попали ли пункты с "вроде", "надо проверить", "посмотрим", "скину", "сегодня уточню" в done?
+3. Не дублирует ли "Чеклист ПМа" персональные задачи людей?
 4. Выделены ли зависимости вида "после X -> Y -> Z"?
 5. Не потеряны ли темы из transcript, которых нет или мало в summary?
 6. Есть ли отдельный блок "Требует подтверждения / ручной проверки"?
 7. Есть ли отдельный блок "Не закрыто / в работе"?
 8. Задача читается как рабочий план дня, а не как протокол встречи?
 9. Нет ли смешения статусов done / in_progress / needs_verification / waiting_dependency?
-10. Все ли важные follow-up вынесены в чеклист или "Не потерять сегодня"?
+10. Не попали ли пункты с "вроде", "надо проверить", "посмотрим", "скину", "сегодня уточню" в done?
 11. Нет ли Markdown-таблиц?
+12. План по людям не раздут: максимум 1-3 обязательства на человека, без разговорных фрагментов?
+13. PM-разделы не раздуты: нет ли пустых пунктов "созвониться", "не потерять", "обновить задачи" без конкретной темы?
 
 Если есть ошибки, исправь Markdown.
 Верни только исправленную финальную версию задачи в Markdown.
@@ -471,6 +489,92 @@ Checklist самопроверки:
             person = self.people.find(str(item.get("person") or ""))
             if person:
                 item["person"] = person.full_name
+
+    def _compact_people_plan(self, analysis: dict[str, Any]) -> None:
+        """Keep only assignable technical commitments, grouped compactly by person."""
+
+        people_plan = analysis.get("people_plan")
+        if not isinstance(people_plan, list):
+            analysis["people_plan"] = []
+            return
+
+        compact: list[dict[str, str]] = []
+        seen_by_person: dict[str, list[str]] = {}
+        count_by_person: dict[str, int] = {}
+        for item in people_plan:
+            if not isinstance(item, dict):
+                continue
+            raw_person = self._text(item.get("person"))
+            task = self._compact_task_title(item.get("task"))
+            if not task:
+                continue
+            person = self.people.find(raw_person)
+            if not person:
+                if raw_person and not self._is_low_signal_person_task(task):
+                    self._append_unique(
+                        analysis,
+                        "pm_checklist",
+                        f"Уточнить владельца и статус: {task} (упомянут {raw_person}).",
+                    )
+                continue
+            if self._is_low_signal_person_task(task):
+                continue
+
+            person_key = person.full_name
+            if count_by_person.get(person_key, 0) >= PEOPLE_TASKS_PER_PERSON_LIMIT:
+                continue
+            task_key = self._similarity_key(task)
+            if not task_key:
+                continue
+            existing_keys = seen_by_person.setdefault(person_key, [])
+            if any(self._is_similar_key(task_key, existing_key) for existing_key in existing_keys):
+                continue
+            existing_keys.append(task_key)
+            count_by_person[person_key] = count_by_person.get(person_key, 0) + 1
+
+            status = self._text(item.get("status")) or "todo"
+            if status not in DAILY_PM_STATUSES:
+                status = "needs_verification"
+            compact.append(
+                {
+                    "person": person.full_name,
+                    "task": task,
+                    "status": status,
+                    "dependency": self._compact_task_title(item.get("dependency")),
+                    "comment": self._compact_task_title(item.get("comment")),
+                }
+            )
+
+        analysis["people_plan"] = compact
+
+    def _filter_low_signal_pm_sections(self, analysis: dict[str, Any]) -> None:
+        for key in ("pm_checklist", "needs_verification", "dont_lose_today"):
+            values = analysis.get(key)
+            if not isinstance(values, list):
+                analysis[key] = []
+                continue
+            analysis[key] = [item for item in self._clean_list(values) if not self._is_low_signal_pm_item(item)]
+
+    def _remove_pm_duplicates_with_people_plan(self, analysis: dict[str, Any]) -> None:
+        people_keys = [
+            self._similarity_key(item.get("task"))
+            for item in analysis.get("people_plan", [])
+            if isinstance(item, dict) and item.get("task")
+        ]
+        people_keys = [key for key in people_keys if key]
+        if not people_keys:
+            return
+
+        for section in ("pm_checklist", "needs_verification", "dont_lose_today"):
+            filtered: list[str] = []
+            for item in self._clean_list(analysis.get(section)):
+                item_key = self._similarity_key(item)
+                if not item_key:
+                    continue
+                if self._is_pm_control_duplicate(item, item_key, people_keys):
+                    continue
+                filtered.append(item)
+            analysis[section] = filtered
 
     def _apply_domain_watchlist(self, analysis: dict[str, Any], payload: dict[str, Any]) -> None:
         text = self._payload_text(payload)
@@ -636,6 +740,188 @@ Checklist самопроверки:
         current.append(value)
 
     @classmethod
+    def _compact_task_title(cls, value: object, *, limit: int = 220) -> str:
+        text = cls._text(value)
+        if not text:
+            return ""
+        text = re.sub(r"^(?:ну|а|так|окей|добро|да|угу)[,:\s]+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(?:типа|короче|в принципе|как бы)\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" -;,.")
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip(" ,.;") + "..."
+
+    @classmethod
+    def _is_low_signal_person_task(cls, value: object) -> bool:
+        text = cls._text(value).casefold()
+        if len(text) < 8:
+            return True
+        if any(
+            phrase in text
+            for phrase in (
+                "формат по дейли",
+                "формат дейли",
+                "каждый озвучивал",
+                "можем разбегаться",
+                "давайте порядок",
+                "на этом все",
+                "если какие-то вопросы",
+                "хорошего дня",
+            )
+        ):
+            return True
+        action_verbs = (
+            "доработ",
+            "сдел",
+            "законч",
+            "провер",
+            "тест",
+            "подготов",
+            "выл",
+            "перенес",
+            "напис",
+            "исправ",
+            "настро",
+            "созда",
+            "скин",
+            "отда",
+            "собра",
+            "соглас",
+            "провест",
+            "показ",
+            "разобра",
+            "продолж",
+            "поднят",
+            "запуст",
+            "дожд",
+            "уточн",
+            "перев",
+            "розіб",
+            "дороб",
+            "перевір",
+            "підгот",
+            "протест",
+            "виправ",
+        )
+        if not any(verb in text for verb in action_verbs):
+            return True
+        return False
+
+    @classmethod
+    def _is_low_signal_pm_item(cls, value: object) -> bool:
+        text = cls._text(value)
+        folded = text.casefold()
+        if len(folded) < 12:
+            return True
+        low_signal_phrases = (
+            "зафиксировать результат обсуждений, запланированных после daily",
+            "зафиксировать результат обсуждений после daily",
+            "обновить задачи с учетом новых чек-листов",
+            "перегенерировать описания",
+            "дозвониться до ответственных по доработкам",
+            "дозвониться до ответственных",
+            "обеспечить дозвон",
+            "поддерживать формат дейли",
+            "поддержать внедрение формата дейли",
+            "формата дейликов",
+            "формат дейликов",
+            "чек-листами для лучшей фиксации",
+            "использовать формат с чек-листами",
+            "перегенерации описания задачи",
+            "не забыть провести демо",
+            "не потерять сегодня",
+        )
+        if any(phrase in folded for phrase in low_signal_phrases):
+            return True
+        if folded.startswith("не потерять") and not cls._has_domain_signal(folded):
+            return True
+        generic_verbs = (
+            "проверить статус",
+            "проконтролировать статус",
+            "уточнить статус",
+            "синхронизироваться",
+            "дождаться результата",
+            "обновить задачу",
+        )
+        if any(folded.startswith(verb) for verb in generic_verbs) and not cls._has_domain_signal(folded):
+            return True
+        return False
+
+    @classmethod
+    def _has_domain_signal(cls, text: str) -> bool:
+        folded = cls._text(text).casefold()
+        domain_tokens = (
+            "payments",
+            "payment",
+            "резерв",
+            "направлен",
+            "табел",
+            "пвра",
+            "вра",
+            "бп",
+            "бпп",
+            "фоп",
+            "база",
+            "кристин",
+            "крон",
+            "cron",
+            "демо",
+            "инструкц",
+            "прод",
+            "продакш",
+            "тест",
+            "баг",
+            "заказ",
+            "фильтр",
+            "холд",
+            "обмен",
+            "интеграц",
+            "send pulse",
+            "manychat",
+            "esputnik",
+            "табель",
+            "отчет",
+        )
+        if any(token in folded for token in domain_tokens):
+            return True
+        return bool(re.search(r"\b(?:иван|анатол|михаил|миша|виктор|витя|андрей|эмиль|валентин|игорь|николай|василий)\b", folded))
+
+    @classmethod
+    def _is_pm_control_duplicate(cls, item: str, item_key: str, people_keys: list[str]) -> bool:
+        folded = item.casefold()
+        pm_control = any(
+            verb in folded
+            for verb in (
+                "проконтрол",
+                "проверить",
+                "уточнить",
+                "синхрониз",
+                "контрол",
+                "обеспеч",
+                "подготов",
+                "собра",
+                "дождаться",
+                "не потерять",
+            )
+        )
+        if not pm_control:
+            return False
+        for person_key in people_keys:
+            if cls._is_similar_key(item_key, person_key):
+                return True
+            if cls._token_overlap(item_key, person_key) >= 0.45:
+                return True
+        return False
+
+    @staticmethod
+    def _token_overlap(left: str, right: str) -> float:
+        left_tokens = set(left.split())
+        right_tokens = set(right.split())
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+
+    @classmethod
     def _clean_people_plan(cls, values: object) -> list[dict[str, str]]:
         if not isinstance(values, list):
             return []
@@ -687,12 +973,7 @@ Checklist самопроверки:
         text = re.sub(r"\[[^\]]+\]", "", text)
         text = re.sub(r"\([^)]*\)", "", text)
         text = re.sub(r"[^\wА-Яа-яІіЇїЄєҐґ]+", " ", text, flags=re.UNICODE)
-        tokens = [
-            token
-            for token in text.split()
-            if len(token) > 2
-            and token
-            not in {
+        stopwords = {
                 "что",
                 "как",
                 "для",
@@ -708,9 +989,73 @@ Checklist самопроверки:
                 "уточнить",
                 "зафиксировать",
                 "дождаться",
+                "контролировать",
+                "не",
+                "забыть",
+                "провести",
+                "организовать",
+                "обеспечить",
+                "своевременный",
+                "сбор",
+                "анализ",
+                "новым",
+                "правкам",
+                "участием",
+                "иван",
+                "ивана",
+                "карповец",
+                "карповца",
+                "анатолий",
+                "анатолия",
+                "михаил",
+                "миша",
+                "виктор",
+                "витя",
+                "андрей",
+                "андрея",
+                "эмиль",
+                "эмиля",
+                "валентин",
+                "игорь",
+                "николай",
+                "василий",
             }
+        tokens = [
+            cls._stem_similarity_token(token)
+            for token in text.split()
+            if len(token) > 2 and token not in stopwords
         ]
         return " ".join(tokens)
+
+    @staticmethod
+    def _stem_similarity_token(token: str) -> str:
+        for prefix in (
+            "исправ",
+            "направ",
+            "провер",
+            "простав",
+            "раздел",
+            "резерв",
+            "табел",
+            "подтверж",
+            "демо",
+            "платеж",
+            "оплат",
+            "заказ",
+            "инструк",
+            "тест",
+            "подготов",
+            "собра",
+            "недель",
+            "дайджест",
+            "доработ",
+            "перенос",
+            "продакш",
+            "отчет",
+        ):
+            if token.startswith(prefix):
+                return prefix
+        return token[:8] if len(token) > 8 else token
 
     @staticmethod
     def _is_similar_key(left: str, right: str) -> bool:
