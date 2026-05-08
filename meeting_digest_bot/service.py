@@ -578,7 +578,11 @@ class MeetingDigestService:
         team_name: str,
         description: str,
     ) -> int:
-        task_id = self._weekly_report_task_id(week_from, week_to, team_name) or self._weekly_task_id(week_from, week_to)
+        task_id = (
+            self._weekly_report_task_id(week_from, week_to, team_name)
+            or self._weekly_task_id(week_from, week_to)
+            or self._find_weekly_report_task_id_in_crm(week_from, week_to, team_name)
+        )
         draft = TaskDraft(
             title=self._weekly_report_title(week_from, week_to, team_name),
             description=description,
@@ -594,6 +598,31 @@ class MeetingDigestService:
             self.bitrix.update_task(task_id, self._task_update_fields(draft))
             return task_id
         return self._create_task(draft)
+
+    def _find_weekly_report_task_id_in_crm(self, week_from: date, week_to: date, team_name: str) -> int | None:
+        expected_title = self._weekly_report_title(week_from, week_to, team_name).casefold().strip()
+        try:
+            data = self.bitrix.list_tasks(
+                filter_data={"GROUP_ID": self.settings.bitrix_group_id},
+                order={"ID": "desc"},
+                select=["ID", "TITLE", "GROUP_ID"],
+            )
+        except Exception:
+            return None
+        result = data.get("result") or {}
+        tasks = result.get("tasks") if isinstance(result, dict) else result
+        if not isinstance(tasks, list):
+            return None
+        for task in tasks:
+            raw_title = str(task.get("title") or task.get("TITLE") or "").strip()
+            if raw_title.casefold() != expected_title:
+                continue
+            task_id = task.get("id") or task.get("ID")
+            try:
+                return int(task_id)
+            except (TypeError, ValueError):
+                return None
+        return None
 
     def _attach_daily_tasks_to_weekly(
         self,
