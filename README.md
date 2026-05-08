@@ -14,7 +14,8 @@ The service is intentionally separated from `AIcallorder`: `AIcallorder` records
 - Updates existing tasks in merge mode with `Point N` sections instead of destructive overwrites.
 - Supports manual Telegram commands in a group by replying to a digest post.
 - Can aggregate daily and weekly meeting results.
-- Provides a foundation for `#daily` planning with Bitrix checklist members.
+- Provides `#daily` planning with Bitrix checklist members, a second-pass checklist editor, and a hard quality gate before CRM write.
+- Builds weekly PM reports from current CRM daily tasks, checklist items, and completion flags instead of re-parsing noisy transcripts.
 - Exports large `#task_discussion` / `#task_demo` flows as accumulated knowledge-object bundles for a future Git/Notion/RAG knowledge base.
 
 ## Current Production Defaults

@@ -154,7 +154,7 @@ Daily-задачи не найдены
 Источники daily-задач
 ```
 
-The report does not re-run the full daily LLM parser. It combines the already published daily task descriptions with current checklist status from Bitrix. This keeps the weekly report stable when the transcript was noisy but the PM later cleaned the task manually.
+The report does not re-run the full daily LLM parser. It combines the already published daily task descriptions with current checklist status from Bitrix. This keeps the weekly report stable when the transcript was noisy but the PM later cleaned the task manually. Transcript content is only context for daily task creation; weekly completion truth comes from CRM task descriptions, checklist items, and completion flags.
 
 Manual command examples:
 
@@ -177,6 +177,16 @@ LLM_MODEL=<model>
 If these values are empty in MeetingDigestBot `.env`, the service also checks `AICALLORDER_ENV_PATH` or, by default, the `.env` file next to `AICALLORDER_DB_PATH`. This allows the daily PM layer to reuse the existing AIcallorder LLM credentials without duplicating secrets.
 
 When enabled, the bot does not publish the raw transcript-like parser output directly. It first builds a PM operating checklist from the daily transcript, AI summary, and fallback parser result.
+
+After the first extraction pass, the bot runs a second LLM pass called the checklist editor. This pass receives only the structured draft and removes transcript noise, duplicates, non-today plans, unknown owners, and PM pseudo-tasks that only repeat a developer's own checklist item.
+
+Before writing to CRM, a deterministic quality gate is applied:
+
+- target checklist volume: 12-16 actionable items
+- hard maximum: 18 checklist items across people and PM sections
+- PM sections together should be smaller than or equal to the number of people tasks
+- `dont_lose_today` is lowest priority and is trimmed first
+- if the editor LLM fails, the quality gate still runs on the first-pass analysis
 
 The transcript is treated as the source of truth. The AI summary is used only as helper structure. If the summary says something is done, but the transcript has markers like `вроде`, `кажется`, `надо проверить`, `после daily обсудим`, `скину`, `найду`, the item is moved to `needs_verification`, `in_progress`, or `waiting_dependency`.
 

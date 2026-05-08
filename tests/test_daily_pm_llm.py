@@ -140,6 +140,41 @@ class DailyPMChecklistLLMTests(unittest.TestCase):
         self.assertEqual(analysis["needs_verification"], ["Проверить запись демо по табелям"])
         self.assertEqual(analysis["dont_lose_today"], ["Не потерять запись демо по табелям"])
 
+    def test_daily_pm_quality_gate_trims_pm_noise_before_crm_task(self) -> None:
+        analysis = {
+            "people_plan": [
+                {
+                    "person": "Иван Карповец",
+                    "task": "Исправить проставление направлений при разделении заказов",
+                    "status": "in_progress",
+                    "dependency": "",
+                    "comment": "",
+                },
+                {
+                    "person": "Михаил Конев",
+                    "task": "Протестировать Payments Pro на подготовленных кейсах",
+                    "status": "todo",
+                    "dependency": "",
+                    "comment": "",
+                },
+            ],
+            "pm_checklist": [f"PM контроль {index}" for index in range(10)],
+            "needs_verification": [f"Проверка {index}" for index in range(5)],
+            "dont_lose_today": [f"Не потерять {index}" for index in range(4)],
+        }
+
+        DailyPMChecklistLLM._apply_quality_gate(analysis)
+
+        people_count = len(analysis["people_plan"])
+        pm_count = (
+            len(analysis["pm_checklist"])
+            + len(analysis["needs_verification"])
+            + len(analysis["dont_lose_today"])
+        )
+        self.assertLessEqual(pm_count, people_count)
+        self.assertLessEqual(people_count + pm_count, 18)
+        self.assertIn("quality_gate_notes", analysis)
+
 
 if __name__ == "__main__":
     unittest.main()

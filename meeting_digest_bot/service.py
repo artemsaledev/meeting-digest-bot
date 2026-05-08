@@ -79,12 +79,14 @@ class MeetingDigestService:
         if publication.digest_type == DigestType.weekly.value:
             if not publication.week_from or not publication.week_to:
                 raise ValueError("Для weekly publication отсутствуют week_from/week_to.")
-            return self.sync_week(
-                WeekSyncRequest(
+            payload_meta = publication.payload if isinstance(publication.payload, dict) else {}
+            return self.run_weekly_report(
+                WeeklyReportRequest(
                     week_from=date.fromisoformat(publication.week_from),
                     week_to=date.fromisoformat(publication.week_to),
-                    action=payload.action,
-                    task_id=payload.task_id,
+                    team_name=str(payload_meta.get("team_name") or "Bitrix Develop Team"),
+                    force=True,
+                    send_telegram=False,
                 )
             )
         if publication.digest_type == DigestType.daily.value:

@@ -23,7 +23,6 @@ from .models import (
     SyncAction,
     TelegramCommand,
     TelegramResponse,
-    WeekSyncRequest,
     WeeklyReportRequest,
 )
 from .service import MeetingDigestService
@@ -176,17 +175,18 @@ class TelegramBotFacade:
                 payload=result.model_dump(),
             )
         elif command.week_from and command.week_to:
-            result = self.service.sync_week(
-                WeekSyncRequest(
+            result = self.service.run_weekly_report(
+                WeeklyReportRequest(
                     week_from=command.week_from,
                     week_to=command.week_to,
-                    action=action,
-                    task_id=command.task_id,
+                    team_name=command.team_name or "Bitrix Develop Team",
+                    force=True,
+                    send_telegram=False,
                 )
             )
             response = TelegramResponse(
                 ok=True,
-                text=self._format_sync_result("недели", result),
+                text=str((result.details or {}).get("telegram_text") or self._format_sync_result("итогов недели", result)),
                 payload=result.model_dump(),
             )
         elif command.post_url:

@@ -35,6 +35,9 @@ ANALYSIS_LIMITS = {
 }
 
 PEOPLE_TASKS_PER_PERSON_LIMIT = 3
+QUALITY_TOTAL_CHECKLIST_LIMIT = 18
+QUALITY_PEOPLE_PLAN_LIMIT = 14
+QUALITY_PM_SOFT_LIMIT = 6
 
 
 @dataclass(slots=True)
@@ -124,6 +127,64 @@ class DailyPMChecklistLLM:
         parsed = self._parse_json_object(content)
         if not parsed:
             return None
+        analysis = self._postprocess_analysis(parsed, payload=payload, apply_quality_gate=False)
+        try:
+            edited = self._editor_step(payload=payload, analysis=analysis)
+        except Exception as exc:
+            edited = None
+            analysis["editor_notes"] = self._clean_list(analysis.get("editor_notes")) + [
+                f"Checklist editor LLM failed; quality gate fallback used: {type(exc).__name__}."
+            ]
+        if edited:
+            analysis = self._postprocess_analysis(edited, payload=payload, apply_quality_gate=True)
+        else:
+            self._apply_quality_gate(analysis)
+        return analysis
+
+    def _editor_step(self, *, payload: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any] | None:
+        content = self._chat_completion(
+            messages=[
+                {"role": "system", "content": self._editor_prompt()},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "date": payload["date"],
+                            "team": payload["team"],
+                            "source_meeting_ids": payload["source"]["meeting_ids"],
+                            "people_directory": payload["people_directory"],
+                            "quality_limits": {
+                                "total_checklist_items": QUALITY_TOTAL_CHECKLIST_LIMIT,
+                                "people_plan": QUALITY_PEOPLE_PLAN_LIMIT,
+                                "pm_sections_soft": QUALITY_PM_SOFT_LIMIT,
+                                "people_tasks_per_person": PEOPLE_TASKS_PER_PERSON_LIMIT,
+                            },
+                            "draft_analysis": analysis,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            response_format={"type": "json_object"},
+        )
+        parsed = self._parse_json_object(content)
+        if not parsed:
+            return None
+        edited = parsed.get("analysis") if isinstance(parsed.get("analysis"), dict) else parsed
+        if not isinstance(edited, dict):
+            return None
+        notes = edited.setdefault("editor_notes", [])
+        if isinstance(notes, list):
+            notes.append("Checklist editor LLM pass applied.")
+        return edited
+
+    def _postprocess_analysis(
+        self,
+        parsed: dict[str, Any],
+        *,
+        payload: dict[str, Any],
+        apply_quality_gate: bool,
+    ) -> dict[str, Any]:
         analysis = self._normalize_analysis(parsed)
         self._canonicalize_people_plan(analysis)
         self._compact_people_plan(analysis)
@@ -132,6 +193,8 @@ class DailyPMChecklistLLM:
         self._remove_pm_duplicates_with_people_plan(analysis)
         self._dedupe_cross_sections(analysis)
         self._limit_analysis_sections(analysis)
+        if apply_quality_gate:
+            self._apply_quality_gate(analysis)
         return analysis
 
     def _generation_step(self, *, payload: dict[str, Any], analysis: dict[str, Any]) -> str:
@@ -350,6 +413,57 @@ todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_
 """.strip()
 
     @staticmethod
+    def _editor_prompt() -> str:
+        return """
+Ты второй проход обработки daily: редактор чеклистов перед созданием CRM-задачи.
+
+На входе уже есть `draft_analysis`. Твоя задача — не пересказывать встречу заново, а ужать и очистить результат до рабочего плана дня.
+
+Что удалить:
+1. Шум стенограммы, разговорные хвосты, "ну/там/посмотрим/если успею".
+2. Дубли между `people_plan`, `pm_checklist`, `needs_verification`, `dont_lose_today`.
+3. Планы не на сегодня: "к концу месяца", "на следующей неделе", "потом", если это не требует действия ПМа именно сегодня.
+4. PM-псевдозадачи: "проконтролировать X", "уточнить статус у X", "не потерять X", если у X уже есть нормальная задача в `people_plan`.
+5. Пункты без исполнимого результата: "созвониться", "обсудить", "посмотреть", если не указан конкретный артефакт или решение.
+6. Неизвестных людей как отдельные чеклисты. Если владелец не из PEOPLE_DIRECTORY, оставь один PM-пункт "уточнить владельца..." только если это реально важно сегодня.
+
+Что оставить:
+1. Конкретные обязательства участников на сегодня, 1-3 пункта на человека.
+2. Реальные зависимости: когда один пункт блокирует другой.
+3. PM-действия только там, где без ПМа процесс не сдвинется: демо, релизное окно, согласование, фиксация решения, критичная ручная проверка.
+4. Ручные проверки результата, которые не повторяют задачу исполнителя.
+
+Quality gate:
+- Целевой общий объем чеклистов: 12-16 пунктов.
+- Жесткий максимум чеклистов: 18 пунктов суммарно по `people_plan` + PM-разделам.
+- Если PM-пунктов больше, чем задач людей, сократи PM-разделы. В норме PM-пунктов должно быть меньше или равно задачам людей.
+- `pm_checklist` + `needs_verification` + `dont_lose_today` вместе — максимум 6, если только людей нет вообще.
+- Сначала сохраняй задачи людей, потом PM-контроль. `dont_lose_today` — самый низкий приоритет.
+
+Верни только JSON object без Markdown:
+{
+  "focus_of_day": ["до 5 фокусов"],
+  "people_plan": [
+    {
+      "person": "canonical full_name из PEOPLE_DIRECTORY",
+      "task": "короткое обязательство результата на сегодня",
+      "status": "todo | in_progress | done | needs_verification | blocked | waiting_dependency | needs_estimation",
+      "dependency": "если есть",
+      "comment": "короткий контекст"
+    }
+  ],
+  "pm_checklist": ["только PM-действия"],
+  "dependencies": ["цепочки X -> Y -> Z"],
+  "needs_verification": ["ручные проверки результата"],
+  "in_progress": ["важное незакрыто / в работе, без дублей чеклистов"],
+  "blockers_and_risks": ["риски"],
+  "dont_lose_today": ["1-2 критичных напоминания, если они не дублируют другое"],
+  "source_conflicts": ["только реальные конфликты источников"],
+  "editor_notes": ["кратко что было очищено"]
+}
+""".strip()
+
+    @staticmethod
     def _generation_prompt() -> str:
         return """
 На основе структурированного анализа daily сформируй финальную задачу дня для ПМа в Markdown.
@@ -366,7 +480,7 @@ todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_
 9. Не используй Markdown-таблицы: Bitrix плохо отображает таблицы в задачах.
 10. Пиши кратко: задача должна быть емкой к обязательствам, а не длинной стенограммой.
 11. Не дублируй одни и те же действия в "Чеклист ПМа", "Требует подтверждения" и "Не потерять сегодня".
-12. Соблюдай лимиты: Фокус дня до 5 пунктов, Чеклист ПМа до 8, Требует подтверждения до 5, Не потерять сегодня до 4.
+12. Соблюдай лимиты: общий объем чеклистов до 18 пунктов; PM-разделы вместе до 6 пунктов; "Не потерять сегодня" только для 1-2 критичных напоминаний.
 13. Если задача человека уже есть в "План по людям", не повторяй ее как PM-контроль, кроме случаев реальной зависимости или демо.
 
 Структура Markdown:
@@ -441,6 +555,7 @@ Checklist самопроверки:
 11. Нет ли Markdown-таблиц?
 12. План по людям не раздут: максимум 1-3 обязательства на человека, без разговорных фрагментов?
 13. PM-разделы не раздуты: нет ли пустых пунктов "созвониться", "не потерять", "обновить задачи" без конкретной темы?
+14. Не превышает ли общий объем чеклистов 18 пунктов и не больше ли PM-пунктов, чем задач людей?
 
 Если есть ошибки, исправь Markdown.
 Верни только исправленную финальную версию задачи в Markdown.
@@ -477,6 +592,8 @@ Checklist самопроверки:
             "blockers_and_risks": cls._clean_list(parsed.get("blockers_and_risks")),
             "dont_lose_today": cls._clean_list(parsed.get("dont_lose_today")),
             "source_conflicts": cls._clean_list(parsed.get("source_conflicts")),
+            "editor_notes": cls._clean_list(parsed.get("editor_notes")),
+            "quality_gate_notes": cls._clean_list(parsed.get("quality_gate_notes")),
         }
 
     def _canonicalize_people_plan(self, analysis: dict[str, Any]) -> None:
@@ -692,6 +809,64 @@ Checklist самопроверки:
             value = analysis.get(key)
             if isinstance(value, list):
                 analysis[key] = value[:limit]
+
+    @classmethod
+    def _apply_quality_gate(cls, analysis: dict[str, Any]) -> None:
+        """Keep the final CRM checklist small enough to be operational."""
+
+        notes: list[str] = []
+        people_plan = cls._clean_people_plan(analysis.get("people_plan"))
+        if len(people_plan) > QUALITY_PEOPLE_PLAN_LIMIT:
+            notes.append(f"People plan trimmed from {len(people_plan)} to {QUALITY_PEOPLE_PLAN_LIMIT}.")
+            people_plan = people_plan[:QUALITY_PEOPLE_PLAN_LIMIT]
+        analysis["people_plan"] = people_plan
+
+        people_count = len([item for item in people_plan if item.get("status") != "done"])
+        original_pm_count = sum(
+            len(cls._clean_list(analysis.get(section)))
+            for section in ("pm_checklist", "needs_verification", "dont_lose_today")
+        )
+        remaining_capacity = max(0, QUALITY_TOTAL_CHECKLIST_LIMIT - people_count)
+        pm_capacity = min(QUALITY_PM_SOFT_LIMIT, remaining_capacity)
+        if people_count:
+            pm_capacity = min(pm_capacity, people_count)
+
+        cls._trim_pm_sections_for_quality_gate(analysis, pm_capacity)
+
+        final_pm_count = sum(
+            len(cls._clean_list(analysis.get(section)))
+            for section in ("pm_checklist", "needs_verification", "dont_lose_today")
+        )
+        final_total = people_count + final_pm_count
+        if original_pm_count > final_pm_count:
+            notes.append(f"PM sections trimmed from {original_pm_count} to {final_pm_count}.")
+        if final_total > QUALITY_TOTAL_CHECKLIST_LIMIT:
+            notes.append(f"Checklist total still high after trimming: {final_total}.")
+        if notes:
+            analysis["quality_gate_notes"] = cls._clean_list(analysis.get("quality_gate_notes")) + notes
+
+    @classmethod
+    def _trim_pm_sections_for_quality_gate(cls, analysis: dict[str, Any], pm_capacity: int) -> None:
+        if pm_capacity <= 0:
+            analysis["pm_checklist"] = []
+            analysis["needs_verification"] = []
+            analysis["dont_lose_today"] = []
+            return
+
+        pm_checklist = cls._clean_list(analysis.get("pm_checklist"))
+        needs_verification = cls._clean_list(analysis.get("needs_verification"))
+        dont_lose_today = cls._clean_list(analysis.get("dont_lose_today"))
+
+        pm_limit = min(len(pm_checklist), min(4, pm_capacity))
+        analysis["pm_checklist"] = pm_checklist[:pm_limit]
+        remaining = pm_capacity - pm_limit
+
+        verification_limit = min(len(needs_verification), min(2, remaining))
+        analysis["needs_verification"] = needs_verification[:verification_limit]
+        remaining -= verification_limit
+
+        dont_lose_limit = min(len(dont_lose_today), min(1, remaining))
+        analysis["dont_lose_today"] = dont_lose_today[:dont_lose_limit]
 
     @classmethod
     def _dedupe_similar_list(cls, values: object, existing: list[str] | None = None) -> list[str]:
@@ -1091,4 +1266,8 @@ Checklist самопроверки:
         conflicts = analysis.get("source_conflicts")
         if isinstance(conflicts, list) and conflicts:
             notes.append(f"Source conflicts: {len(conflicts)}")
+        for key in ("editor_notes", "quality_gate_notes"):
+            values = analysis.get(key)
+            if isinstance(values, list):
+                notes.extend(str(item) for item in values if item)
         return notes
