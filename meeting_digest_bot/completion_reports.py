@@ -13,6 +13,7 @@ class ChecklistCompletionItem:
     title: str
     group_title: str
     is_complete: bool
+    category: str = "person"
     bitrix_user_id: int | None = None
     person_name: str = ""
     telegram_username: str = ""
@@ -69,13 +70,15 @@ class CompletionReportBuilder:
             if not title:
                 continue
             group_title = parents.get(parent_id, "")
-            person = self._person_for_row(row, group_title)
+            category = self._category_for_group(group_title)
+            person = self._person_for_row(row, group_title, category)
             item = ChecklistCompletionItem(
                 title=title,
                 group_title=group_title,
                 is_complete=self._is_complete(row),
+                category=category,
                 bitrix_user_id=person.bitrix_user_id if person else None,
-                person_name=person.full_name if person else group_title,
+                person_name=person.full_name if person else self._fallback_label_for_group(group_title, category),
                 telegram_username=person.telegram_username if person else "",
             )
             report.total_items += 1
@@ -101,27 +104,75 @@ class CompletionReportBuilder:
             lines.extend(["", "Все пункты чек-листа закрыты."])
             return "\n".join(lines).strip()
 
-        lines.extend(["", "Не закрыто по ответственным:"])
-        for person_label, items in self._group_open_items(report.open_items).items():
+        person_open = self._dedupe_items(self._person_items(report.open_items))
+        pm_open = self._dedupe_items(self._pm_items(report.open_items))
+        other_open = self._dedupe_items(self._other_items(report.open_items))
+
+        if person_open:
+            lines.extend(["", "Не закрыто по ответственным:"])
+        for person_label, items in self._group_open_items(person_open).items():
             lines.append(person_label)
             lines.extend(f"- {item.title}" for item in items)
+
+        if pm_open:
+            lines.extend(["", "PM-контроль / ручная проверка:"])
+            for group_title, items in self._group_by_title(pm_open).items():
+                lines.append(group_title)
+                lines.extend(f"- {item.title}" for item in items)
+
+        if other_open:
+            lines.extend(["", "Не закрыто без явного ответственного:"])
+            lines.extend(f"- {item.group_title}: {item.title}" for item in other_open)
         return "\n".join(lines).strip()
 
     def format_daily_telegram(self, report: DailyCompletionReport) -> str:
+        person_open = self._dedupe_items(self._person_items(report.open_items))
+        pm_open = self._dedupe_items(self._pm_items(report.open_items))
+        other_open = self._dedupe_items(self._other_items(report.open_items))
+        person_total = len(self._person_items(report.open_items + report.closed_items))
+        person_completed = len([item for item in self._person_items(report.closed_items) if item.is_complete])
+        pm_total = len(self._pm_items(report.open_items + report.closed_items))
+        pm_completed = len([item for item in self._pm_items(report.closed_items) if item.is_complete])
+
         lines = [
             f"Итоги плана дня {report.report_date.strftime('%d.%m.%Y')}",
             f"Задача #{report.task_id}: {report.task_url}",
             f"Выполнено: {report.completed_items}/{report.total_items}",
         ]
+        if person_total or pm_total:
+            lines.append(f"По людям: {person_completed}/{person_total}; PM-контроль: {pm_completed}/{pm_total}")
         if not report.open_items:
             lines.append("Все пункты закрыты.")
             return "\n".join(lines).strip()
 
-        lines.extend(["", "Не закрыто:"])
-        for person_label, items in self._group_open_items(report.open_items).items():
+        if person_open:
+            lines.extend(["", "Не закрыто по людям:"])
+        for person_label, items in self._group_open_items(person_open).items():
             lines.append(person_label)
-            lines.extend(f"- {item.title}" for item in items)
-        return "\n".join(lines).strip()
+            for item in items[:5]:
+                lines.append(f"- {item.title}")
+            if len(items) > 5:
+                lines.append(f"- ...и еще {len(items) - 5} пунктов")
+
+        if pm_open:
+            pm_mention = self._pm_mention()
+            lines.extend(["", f"PM-контроль {pm_mention}".rstrip()])
+            for group_title, items in self._group_by_title(pm_open).items():
+                lines.append(f"{group_title}: {len(items)} открыто")
+                for item in items[:3]:
+                    lines.append(f"- {item.title}")
+                if len(items) > 3:
+                    lines.append(f"- ...и еще {len(items) - 3} пунктов")
+
+        if other_open:
+            lines.extend(["", "Без явного ответственного:"])
+            for item in other_open[:5]:
+                lines.append(f"- {item.group_title}: {item.title}")
+            if len(other_open) > 5:
+                lines.append(f"- ...и еще {len(other_open) - 5} пунктов")
+
+        lines.extend(["", "Полный список и отметки чек-листов смотри в задаче."])
+        return self._fit_telegram_text(lines)
 
     def format_weekly_comment(
         self,
@@ -214,13 +265,34 @@ class CompletionReportBuilder:
             missing_dates=missing_dates,
         )
 
-    def _person_for_row(self, row: dict[str, Any], group_title: str) -> Person | None:
+    def _person_for_row(self, row: dict[str, Any], group_title: str, category: str = "person") -> Person | None:
+        if category.startswith("pm"):
+            return None
         member_ids = self._member_ids(row)
         for member_id in member_ids:
             person = self.people.find_by_bitrix_user_id(member_id)
             if person:
                 return person
         return self.people.find(group_title)
+
+    @staticmethod
+    def _category_for_group(group_title: str) -> str:
+        normalized = group_title.casefold().strip()
+        if "чеклист пм" in normalized or normalized == "pm":
+            return "pm_checklist"
+        if normalized.startswith("pm: требует") or "требует подтверждения" in normalized:
+            return "pm_verification"
+        if normalized.startswith("pm: не потерять") or "не потерять сегодня" in normalized:
+            return "pm_dont_lose"
+        if normalized.startswith("pm:") or "пм" in normalized:
+            return "pm_other"
+        return "person"
+
+    @staticmethod
+    def _fallback_label_for_group(group_title: str, category: str) -> str:
+        if category.startswith("pm"):
+            return "PM-контроль"
+        return group_title
 
     @staticmethod
     def _parent_titles(rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -264,6 +336,37 @@ class CompletionReportBuilder:
         return grouped
 
     @staticmethod
+    def _group_by_title(items: list[ChecklistCompletionItem]) -> dict[str, list[ChecklistCompletionItem]]:
+        grouped: dict[str, list[ChecklistCompletionItem]] = {}
+        for item in items:
+            grouped.setdefault(item.group_title or "PM-контроль", []).append(item)
+        return grouped
+
+    @staticmethod
+    def _person_items(items: list[ChecklistCompletionItem]) -> list[ChecklistCompletionItem]:
+        return [item for item in items if item.category == "person"]
+
+    @staticmethod
+    def _pm_items(items: list[ChecklistCompletionItem]) -> list[ChecklistCompletionItem]:
+        return [item for item in items if item.category.startswith("pm")]
+
+    @staticmethod
+    def _other_items(items: list[ChecklistCompletionItem]) -> list[ChecklistCompletionItem]:
+        return [item for item in items if item.category not in {"person"} and not item.category.startswith("pm")]
+
+    @classmethod
+    def _dedupe_items(cls, items: list[ChecklistCompletionItem]) -> list[ChecklistCompletionItem]:
+        result: list[ChecklistCompletionItem] = []
+        seen: set[str] = set()
+        for item in items:
+            key = cls._normalize_item_text(item.title)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
+
+    @staticmethod
     def _person_label(item: ChecklistCompletionItem) -> str:
         if item.telegram_username:
             return f"{item.person_name} {item.telegram_username}"
@@ -274,16 +377,23 @@ class CompletionReportBuilder:
         seen: set[str] = set()
         for item in items:
             mention = item.telegram_username.strip()
+            if not mention and item.category.startswith("pm"):
+                mention = self._pm_mention()
             if not mention or mention in seen:
                 continue
             seen.add(mention)
             result.append(mention)
         return result
 
+    def _pm_mention(self) -> str:
+        person = self.people.find_by_bitrix_user_id(114736)
+        if person and person.telegram_username:
+            return person.telegram_username
+        return ""
+
     @staticmethod
     def _is_pm_item(item: ChecklistCompletionItem) -> bool:
-        title = item.group_title.casefold()
-        return title.startswith("pm:") or "чеклист пм" in title or "пма" in title
+        return item.category.startswith("pm")
 
     @staticmethod
     def _is_verification_item(item: ChecklistCompletionItem) -> bool:
@@ -298,6 +408,31 @@ class CompletionReportBuilder:
             "waiting_dependency",
         )
         return any(marker in text for marker in markers)
+
+    @classmethod
+    def _fit_telegram_text(cls, lines: list[str], limit: int = 3900) -> str:
+        text = "\n".join(lines).strip()
+        if len(text) <= limit:
+            return text
+        result: list[str] = []
+        overflow = 0
+        for line in lines:
+            candidate = "\n".join(result + [line, "", "Сообщение сокращено, полный список в задаче."]).strip()
+            if len(candidate) > limit:
+                overflow += 1
+                continue
+            result.append(line)
+        if overflow:
+            result.extend(["", f"Сообщение сокращено: скрыто {overflow} строк, полный список в задаче."])
+        return "\n".join(result).strip()
+
+    @staticmethod
+    def _normalize_item_text(text: str) -> str:
+        normalized = re.sub(r"\[[^\]]+\]", "", text or "")
+        normalized = re.sub(r"\([^)]*зависит[^)]*\)", "", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"[^\wА-Яа-яІіЇїЄєҐґ]+", " ", normalized, flags=re.UNICODE)
+        normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
+        return normalized
 
     def _weekly_focus_lines(self, reports: list[DailyCompletionReport]) -> list[str]:
         result: list[str] = []

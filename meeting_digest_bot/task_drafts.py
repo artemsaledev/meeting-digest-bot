@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .models import ChecklistGroup, ChecklistItem, DailyPlan, DailyRollup, MeetingRecord, PublicationRecord, TaskDraft, WeeklyRollup
@@ -167,6 +168,18 @@ def build_daily_plan_task_draft(
     plan: DailyPlan,
     default_tags: list[str] | None = None,
 ) -> TaskDraft:
+    pm_checklist = _dedupe_text_items(plan.pm_checklist, limit=12)
+    pm_needs_verification = _dedupe_text_items(
+        plan.pm_needs_verification,
+        existing=pm_checklist,
+        limit=7,
+    )
+    pm_dont_lose_today = _dedupe_text_items(
+        plan.pm_dont_lose_today,
+        existing=pm_checklist + pm_needs_verification,
+        limit=6,
+    )
+
     if plan.pm_markdown:
         title = f"План дня ПМ по daily: {plan.report_date.strftime('%d.%m.%Y')} / {plan.team_name}"
         description = plan.pm_markdown.strip()
@@ -208,7 +221,7 @@ def build_daily_plan_task_draft(
         description = "\n".join(description_parts).strip()
 
     checklist_groups: list[ChecklistGroup] = []
-    if plan.pm_checklist:
+    if pm_checklist:
         checklist_groups.append(
             ChecklistGroup(
                 title="Чеклист ПМа",
@@ -218,11 +231,11 @@ def build_daily_plan_task_draft(
                         members=[PM_BITRIX_USER_ID],
                         meta={"item_type": "pm_follow_up"},
                     )
-                    for item in plan.pm_checklist
+                    for item in pm_checklist
                 ],
             )
         )
-    if plan.pm_needs_verification:
+    if pm_needs_verification:
         checklist_groups.append(
             ChecklistGroup(
                 title="PM: Требует подтверждения",
@@ -232,11 +245,11 @@ def build_daily_plan_task_draft(
                         members=[PM_BITRIX_USER_ID],
                         meta={"item_type": "pm_needs_verification"},
                     )
-                    for item in plan.pm_needs_verification
+                    for item in pm_needs_verification
                 ],
             )
         )
-    if plan.pm_dont_lose_today:
+    if pm_dont_lose_today:
         checklist_groups.append(
             ChecklistGroup(
                 title="PM: Не потерять сегодня",
@@ -246,7 +259,7 @@ def build_daily_plan_task_draft(
                         members=[PM_BITRIX_USER_ID],
                         meta={"item_type": "pm_dont_lose_today"},
                     )
-                    for item in plan.pm_dont_lose_today
+                    for item in pm_dont_lose_today
                 ],
             )
         )
@@ -277,8 +290,8 @@ def build_daily_plan_task_draft(
         comment_lines.append(f"Общих блокеров: {len(plan.global_blockers)}")
     if plan.unmatched_items:
         comment_lines.append(f"Требуют ручной проверки: {len(plan.unmatched_items)}")
-    if plan.pm_checklist:
-        comment_lines.append(f"PM follow-up пунктов: {len(plan.pm_checklist)}")
+    if pm_checklist:
+        comment_lines.append(f"PM follow-up пунктов: {len(pm_checklist)}")
     if plan.pm_generation_notes:
         comment_lines.extend(["", "PM-слой", *_to_bullets(plan.pm_generation_notes)])
 
@@ -308,6 +321,63 @@ def _clean_list(values: object) -> list[str]:
         if text:
             result.append(text)
     return result
+
+
+def _dedupe_text_items(values: list[str], *, existing: list[str] | None = None, limit: int | None = None) -> list[str]:
+    result: list[str] = []
+    keys = [_similarity_key(item) for item in existing or []]
+    for value in values or []:
+        text = _plain_text_for_crm(value)
+        if not text:
+            continue
+        key = _similarity_key(text)
+        if not key:
+            continue
+        if any(_is_similar_key(key, other) for other in keys):
+            continue
+        keys.append(key)
+        result.append(text)
+        if limit and len(result) >= limit:
+            break
+    return result
+
+
+def _similarity_key(value: object) -> str:
+    text = str(value or "").replace("\u00a0", " ").casefold()
+    text = re.sub(r"\[[^\]]+\]", "", text)
+    text = re.sub(r"\([^)]*\)", "", text)
+    text = re.sub(r"[^\wА-Яа-яІіЇїЄєҐґ]+", " ", text, flags=re.UNICODE)
+    stopwords = {
+        "для",
+        "или",
+        "что",
+        "как",
+        "это",
+        "при",
+        "про",
+        "после",
+        "сегодня",
+        "проверить",
+        "проконтролировать",
+        "уточнить",
+        "зафиксировать",
+        "дождаться",
+        "получить",
+        "обеспечить",
+    }
+    return " ".join(token for token in text.split() if len(token) > 2 and token not in stopwords)
+
+
+def _is_similar_key(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right or left in right or right in left:
+        return True
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return False
+    return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens)) >= 0.72
 
 
 def _truncate_text(text: str, limit: int) -> str:

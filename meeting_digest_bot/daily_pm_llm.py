@@ -22,6 +22,18 @@ DAILY_PM_STATUSES = {
     "needs_estimation",
 }
 
+ANALYSIS_LIMITS = {
+    "focus_of_day": 7,
+    "people_plan": 12,
+    "pm_checklist": 12,
+    "dependencies": 8,
+    "needs_verification": 7,
+    "in_progress": 10,
+    "blockers_and_risks": 8,
+    "dont_lose_today": 6,
+    "source_conflicts": 6,
+}
+
 
 @dataclass(slots=True)
 class DailyPMLLMConfig:
@@ -113,6 +125,8 @@ class DailyPMChecklistLLM:
         analysis = self._normalize_analysis(parsed)
         self._canonicalize_people_plan(analysis)
         self._apply_domain_watchlist(analysis, payload)
+        self._dedupe_cross_sections(analysis)
+        self._limit_analysis_sections(analysis)
         return analysis
 
     def _generation_step(self, *, payload: dict[str, Any], analysis: dict[str, Any]) -> str:
@@ -268,6 +282,13 @@ follow-up или зависимость. Такие пункты нельзя о
 - обновить задачу;
 - проверить, что проблема закрыта не только со слов, но и по факту.
 
+Ограничения объема и дублей:
+- `pm_checklist` — главный исполнимый список ПМа, максимум 12 пунктов.
+- `needs_verification` — только отдельные ручные проверки, максимум 7 пунктов; не копируй туда дословно пункты из `pm_checklist`.
+- `dont_lose_today` — короткие напоминания, максимум 6 пунктов; не копируй туда то же действие, что уже есть в `pm_checklist`.
+- Не создавай отдельный PM-пункт для каждого упоминания темы. Объединяй близкие действия в один контрольный пункт.
+- Не дублируй одну тему в трех разделах: если она есть в `pm_checklist`, в дополнительных разделах оставляй только уточнение другого типа.
+
 Допустимые статусы:
 todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_estimation.
 
@@ -328,6 +349,8 @@ todo, in_progress, done, needs_verification, blocked, waiting_dependency, needs_
 8. Не теряй мелкие follow-up: записи, комментарии, обещания "скину", "найду", "после daily обсудим".
 9. Не используй Markdown-таблицы: Bitrix плохо отображает таблицы в задачах.
 10. Пиши кратко, но с достаточным контекстом для контроля дня.
+11. Не дублируй одни и те же действия в "Чеклист ПМа", "Требует подтверждения" и "Не потерять сегодня".
+12. Соблюдай лимиты: Фокус дня до 7 пунктов, Чеклист ПМа до 12, Требует подтверждения до 7, Не потерять сегодня до 6.
 
 Структура Markdown:
 
@@ -427,7 +450,7 @@ Checklist самопроверки:
     @classmethod
     def _normalize_analysis(cls, parsed: dict[str, Any]) -> dict[str, Any]:
         return {
-            "focus_of_day": cls._clean_list(parsed.get("focus_of_day"))[:7],
+            "focus_of_day": cls._clean_list(parsed.get("focus_of_day")),
             "people_plan": cls._clean_people_plan(parsed.get("people_plan")),
             "pm_checklist": cls._clean_list(parsed.get("pm_checklist")),
             "dependencies": cls._clean_list(parsed.get("dependencies")),
@@ -544,6 +567,50 @@ Checklist самопроверки:
                 "Зафиксировать результат обсуждений, запланированных после daily.",
             )
 
+    @classmethod
+    def _dedupe_cross_sections(cls, analysis: dict[str, Any]) -> None:
+        analysis["pm_checklist"] = cls._dedupe_similar_list(analysis.get("pm_checklist"))
+        pm_checklist = analysis.get("pm_checklist") or []
+        analysis["needs_verification"] = cls._dedupe_similar_list(
+            analysis.get("needs_verification"),
+            existing=pm_checklist,
+        )
+        analysis["dont_lose_today"] = cls._dedupe_similar_list(
+            analysis.get("dont_lose_today"),
+            existing=pm_checklist + (analysis.get("needs_verification") or []),
+        )
+        for key in ("focus_of_day", "dependencies", "in_progress", "blockers_and_risks", "source_conflicts"):
+            analysis[key] = cls._dedupe_similar_list(analysis.get(key))
+
+    @classmethod
+    def _limit_analysis_sections(cls, analysis: dict[str, Any]) -> None:
+        for key, limit in ANALYSIS_LIMITS.items():
+            value = analysis.get(key)
+            if isinstance(value, list):
+                analysis[key] = value[:limit]
+
+    @classmethod
+    def _dedupe_similar_list(cls, values: object, existing: list[str] | None = None) -> list[str]:
+        result: list[str] = []
+        seen: list[str] = []
+        for item in existing or []:
+            key = cls._similarity_key(item)
+            if key:
+                seen.append(key)
+        iterable = values if isinstance(values, list) else []
+        for value in iterable:
+            text = cls._text(value)
+            if not text:
+                continue
+            key = cls._similarity_key(text)
+            if not key:
+                continue
+            if any(cls._is_similar_key(key, other) for other in seen):
+                continue
+            seen.append(key)
+            result.append(text)
+        return result
+
     @staticmethod
     def _payload_text(payload: dict[str, Any]) -> str:
         chunks: list[str] = []
@@ -563,6 +630,8 @@ Checklist самопроверки:
         normalized_value = cls._text(value).casefold()
         for item in current:
             if cls._text(item).casefold() == normalized_value:
+                return
+            if cls._is_similar_key(cls._similarity_key(item), cls._similarity_key(value)):
                 return
         current.append(value)
 
@@ -611,6 +680,50 @@ Checklist самопроверки:
         text = re.sub(r"^\s*(?:[-*•]|\d+[.)]|\[[ xX]\])\s*", "", text)
         text = re.sub(r"\s+", " ", text)
         return text.strip(" -;")
+
+    @classmethod
+    def _similarity_key(cls, value: object) -> str:
+        text = cls._text(value).casefold()
+        text = re.sub(r"\[[^\]]+\]", "", text)
+        text = re.sub(r"\([^)]*\)", "", text)
+        text = re.sub(r"[^\wА-Яа-яІіЇїЄєҐґ]+", " ", text, flags=re.UNICODE)
+        tokens = [
+            token
+            for token in text.split()
+            if len(token) > 2
+            and token
+            not in {
+                "что",
+                "как",
+                "для",
+                "или",
+                "это",
+                "над",
+                "при",
+                "про",
+                "после",
+                "сегодня",
+                "проверить",
+                "проконтролировать",
+                "уточнить",
+                "зафиксировать",
+                "дождаться",
+            }
+        ]
+        return " ".join(tokens)
+
+    @staticmethod
+    def _is_similar_key(left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        if left == right or left in right or right in left:
+            return True
+        left_tokens = set(left.split())
+        right_tokens = set(right.split())
+        if not left_tokens or not right_tokens:
+            return False
+        overlap = len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+        return overlap >= 0.72
 
     @staticmethod
     def _normalize_markdown(markdown: str, *, report_date: date, team_name: str) -> str:
