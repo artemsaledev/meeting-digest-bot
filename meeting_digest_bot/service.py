@@ -125,6 +125,48 @@ class MeetingDigestService:
         return result
 
     def sync_week(self, payload: WeekSyncRequest) -> SyncResult:
+        if payload.action == SyncAction.preview:
+            source_type = "daily_plan_weekly_report"
+            source_key = f"{payload.week_from.isoformat()}:{payload.week_to.isoformat()}:Bitrix Develop Team"
+            reports = self._build_daily_completion_reports_between(
+                payload.week_from,
+                payload.week_to,
+                "Bitrix Develop Team",
+            )
+            missing_dates = self._missing_daily_completion_dates(
+                payload.week_from,
+                payload.week_to,
+                reports,
+            )
+            comment = self.completion_reports.format_weekly_comment(
+                week_from=payload.week_from,
+                week_to=payload.week_to,
+                team_name="Bitrix Develop Team",
+                reports=reports,
+                missing_dates=missing_dates,
+            )
+            weekly_task_id = self._weekly_report_task_id(payload.week_from, payload.week_to, "Bitrix Develop Team")
+            telegram_text = self.completion_reports.format_weekly_telegram(
+                week_from=payload.week_from,
+                week_to=payload.week_to,
+                team_name="Bitrix Develop Team",
+                reports=reports,
+                missing_dates=missing_dates,
+                weekly_task_id=weekly_task_id,
+                weekly_task_url=self._task_url(weekly_task_id) if weekly_task_id else None,
+            )
+            return SyncResult(
+                action="weekly_report_preview",
+                title=self._weekly_report_title(payload.week_from, payload.week_to, "Bitrix Develop Team"),
+                source_type=source_type,
+                source_key=source_key,
+                details=self._weekly_report_details(reports)
+                | {
+                    "missing_dates": [item.isoformat() for item in missing_dates],
+                    "preview_text": comment,
+                    "telegram_text": telegram_text,
+                },
+            )
         return self.run_weekly_report(
             WeeklyReportRequest(
                 week_from=payload.week_from,
