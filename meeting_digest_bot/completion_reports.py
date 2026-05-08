@@ -185,8 +185,8 @@ class CompletionReportBuilder:
     ) -> str:
         total = sum(report.total_items for report in reports)
         completed = sum(report.completed_items for report in reports)
-        open_items = [(report, item) for report in reports for item in report.open_items]
-        closed_items = [(report, item) for report in reports for item in report.closed_items]
+        open_items = self._dedupe_report_items([(report, item) for report in reports for item in report.open_items])
+        closed_items = self._dedupe_report_items([(report, item) for report in reports for item in report.closed_items])
         missing_dates = missing_dates or []
         lines = [
             f"Единый weekly PM-дайджест {week_from.strftime('%d.%m')} - {week_to.strftime('%d.%m.%Y')}",
@@ -205,47 +205,43 @@ class CompletionReportBuilder:
         if mentions:
             lines.extend(["", f"Ответственные с незакрытыми пунктами: {' '.join(mentions)}"])
 
+        task_links = [f"#{report.task_id}: {report.task_url}" for report in reports]
+        if task_links:
+            lines.extend(["", "Daily-задачи недели"])
+            lines.extend(f"- {item}" for item in task_links)
+
         focus_lines = self._weekly_focus_lines(reports)
         if focus_lines:
             lines.extend(["", "Фокус недели по daily-планам"])
-            lines.extend(f"- {item}" for item in focus_lines[:20])
+            lines.extend(f"- {item}" for item in focus_lines[:12])
 
         if closed_items:
             lines.extend(["", "Закрыто за неделю"])
-            for report, item in closed_items[:60]:
+            for report, item in closed_items:
                 person = self._person_label(item)
                 lines.append(f"- {report.report_date.strftime('%d.%m')} | {person}: {item.title}")
-            if len(closed_items) > 60:
-                lines.append(f"- ...и еще {len(closed_items) - 60} закрытых пунктов")
 
         if open_items:
-            lines.extend(["", "Не закрыто по дням"])
-            for report, item in open_items:
-                person = self._person_label(item)
-                lines.append(f"- {report.report_date.strftime('%d.%m')} | {person}: {item.title}")
+            lines.extend(["", "Не закрыто по ответственным"])
+            for person, grouped_items in self._group_report_items_by_person(open_items).items():
+                lines.append(person)
+                for report, item in grouped_items:
+                    lines.append(f"- {report.report_date.strftime('%d.%m')}: {item.title}")
         else:
-            lines.extend(["", "Не закрыто по дням", "- Все найденные пункты недели закрыты."])
+            lines.extend(["", "Не закрыто по ответственным", "- Все найденные пункты недели закрыты."])
 
-        pm_open = [(report, item) for report, item in open_items if self._is_pm_item(item)]
-        if pm_open:
-            lines.extend(["", "PM follow-up / контроль ПМа"])
-            for report, item in pm_open:
-                lines.append(f"- {report.report_date.strftime('%d.%m')} | {item.group_title}: {item.title}")
-
-        verification_open = [(report, item) for report, item in open_items if self._is_verification_item(item)]
-        if verification_open:
-            lines.extend(["", "Требует проверки / риски"])
-            for report, item in verification_open:
-                lines.append(f"- {report.report_date.strftime('%d.%m')} | {item.title}")
+        verification_count = sum(1 for _, item in open_items if self._is_verification_item(item))
+        pm_count = sum(1 for _, item in open_items if self._is_pm_item(item))
+        if verification_count or pm_count:
+            lines.extend(["", "Контрольные акценты"])
+            if pm_count:
+                lines.append(f"- PM-контроль: {pm_count} открытых пунктов")
+            if verification_count:
+                lines.append(f"- Требует ручной проверки / несет риск: {verification_count} пунктов")
 
         if missing_dates:
             lines.extend(["", "Daily-задачи не найдены"])
             lines.extend(f"- {item.strftime('%d.%m.%Y')}" for item in missing_dates)
-
-        task_links = [f"#{report.task_id}: {report.task_url}" for report in reports]
-        if task_links:
-            lines.extend(["", "Источники daily-задач"])
-            lines.extend(f"- {item}" for item in task_links)
         return "\n".join(lines).strip()
 
     def format_weekly_telegram(
@@ -256,14 +252,50 @@ class CompletionReportBuilder:
         team_name: str,
         reports: list[DailyCompletionReport],
         missing_dates: list[date] | None = None,
+        weekly_task_id: int | None = None,
+        weekly_task_url: str | None = None,
     ) -> str:
-        return self.format_weekly_comment(
-            week_from=week_from,
-            week_to=week_to,
-            team_name=team_name,
-            reports=reports,
-            missing_dates=missing_dates,
+        total = sum(report.total_items for report in reports)
+        completed = sum(report.completed_items for report in reports)
+        open_items = self._dedupe_report_items([(report, item) for report in reports for item in report.open_items])
+        closed_items = self._dedupe_report_items([(report, item) for report in reports for item in report.closed_items])
+        missing_dates = missing_dates or []
+        mentions = self._weekly_mentions([item for _, item in open_items])
+
+        lines = [
+            f"Weekly PM-итоги {week_from.strftime('%d.%m')} - {week_to.strftime('%d.%m.%Y')}",
+            f"Команда: {team_name}",
+        ]
+        if weekly_task_id and weekly_task_url:
+            lines.extend([f"Задача недели #{weekly_task_id}:", weekly_task_url])
+        lines.extend(
+            [
+                "",
+                f"Daily-задач: {len(reports)}; пунктов: {total}; закрыто: {completed}; открыто: {len(open_items)}",
+            ]
         )
+        if missing_dates:
+            lines.append(f"Не найдены daily-задачи: {', '.join(item.strftime('%d.%m') for item in missing_dates)}")
+        if mentions:
+            lines.extend(["", f"Ответственные с открытыми пунктами: {' '.join(mentions)}"])
+
+        open_by_person = self._group_report_items_by_person(open_items)
+        if open_by_person:
+            lines.extend(["", "Открыто по ответственным:"])
+            for person, items in open_by_person.items():
+                lines.append(f"- {person}: {len(items)}")
+
+        if closed_items:
+            closed_by_person = self._group_report_items_by_person(closed_items)
+            closed_summary = ", ".join(f"{person}: {len(items)}" for person, items in closed_by_person.items())
+            if closed_summary:
+                lines.extend(["", f"Закрыто по ответственным: {closed_summary}"])
+
+        task_numbers = ", ".join(f"#{report.task_id}" for report in reports)
+        if task_numbers:
+            lines.extend(["", f"Daily-подзадачи: {task_numbers}"])
+        lines.extend(["", "Полный список закрытых и открытых пунктов смотри в задаче недели."])
+        return self._fit_telegram_text(lines, limit=3600)
 
     def _person_for_row(self, row: dict[str, Any], group_title: str, category: str = "person") -> Person | None:
         if category.startswith("pm"):
@@ -366,8 +398,10 @@ class CompletionReportBuilder:
             result.append(item)
         return result
 
-    @staticmethod
-    def _person_label(item: ChecklistCompletionItem) -> str:
+    def _person_label(self, item: ChecklistCompletionItem) -> str:
+        if item.category.startswith("pm"):
+            pm_mention = self._pm_mention()
+            return f"PM-контроль {pm_mention}".rstrip()
         if item.telegram_username:
             return f"{item.person_name} {item.telegram_username}"
         return item.person_name or item.group_title or "Без ответственного"
@@ -383,6 +417,34 @@ class CompletionReportBuilder:
                 continue
             seen.add(mention)
             result.append(mention)
+        return result
+
+    def _group_report_items_by_person(
+        self,
+        items: list[tuple[DailyCompletionReport, ChecklistCompletionItem]],
+    ) -> dict[str, list[tuple[DailyCompletionReport, ChecklistCompletionItem]]]:
+        grouped: dict[str, list[tuple[DailyCompletionReport, ChecklistCompletionItem]]] = {}
+        for report, item in items:
+            grouped.setdefault(self._person_label(item), []).append((report, item))
+        return grouped
+
+    @classmethod
+    def _dedupe_report_items(
+        cls,
+        items: list[tuple[DailyCompletionReport, ChecklistCompletionItem]],
+    ) -> list[tuple[DailyCompletionReport, ChecklistCompletionItem]]:
+        result: list[tuple[DailyCompletionReport, ChecklistCompletionItem]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for report, item in items:
+            key = (
+                report.report_date.isoformat(),
+                item.group_title.casefold().strip(),
+                cls._normalize_item_text(item.title),
+            )
+            if not key[2] or key in seen:
+                continue
+            seen.add(key)
+            result.append((report, item))
         return result
 
     def _pm_mention(self) -> str:

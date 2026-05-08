@@ -64,6 +64,34 @@ class CompletionReportTests(unittest.TestCase):
         self.assertLessEqual(len(telegram), 3900)
         self.assertTrue("Полный список" in telegram or "Сообщение сокращено" in telegram)
 
+    def test_weekly_telegram_is_compact_and_points_to_weekly_task(self) -> None:
+        builder = CompletionReportBuilder()
+        rows = [_parent("1", "Иван Карповец")]
+        for index in range(80):
+            rows.append(_child(str(index + 2), "1", f"Незакрытый пункт {index}", members={"51977": {}}))
+        report = builder.build_daily(
+            report_date=date(2026, 5, 8),
+            team_name="Bitrix Develop Team",
+            task_id=169767,
+            task_url="https://totiscrm.com/workgroups/group/512/tasks/task/view/169767/",
+            checklist_rows=rows,
+        )
+
+        telegram = builder.format_weekly_telegram(
+            week_from=date(2026, 5, 4),
+            week_to=date(2026, 5, 8),
+            team_name="Bitrix Develop Team",
+            reports=[report],
+            weekly_task_id=170000,
+            weekly_task_url="https://totiscrm.com/workgroups/group/512/tasks/task/view/170000/",
+        )
+
+        self.assertLessEqual(len(telegram), 3600)
+        self.assertIn("Задача недели #170000", telegram)
+        self.assertIn("Иван Карповец @karpovets90: 80", telegram)
+        self.assertIn("Полный список", telegram)
+        self.assertNotIn("Незакрытый пункт 79", telegram)
+
 
 if __name__ == "__main__":
     unittest.main()

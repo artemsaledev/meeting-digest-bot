@@ -360,7 +360,6 @@ class MeetingDigestService:
     def run_weekly_report(self, payload: WeeklyReportRequest) -> SyncResult:
         source_type = "daily_plan_weekly_report"
         source_key = f"{payload.week_from.isoformat()}:{payload.week_to.isoformat()}:{payload.team_name}"
-        existing = self.state.get_task_binding(source_type=source_type, source_key=source_key)
         reports = self._build_daily_completion_reports_between(payload.week_from, payload.week_to, payload.team_name)
         missing_dates = self._missing_daily_completion_dates(
             payload.week_from,
@@ -374,58 +373,55 @@ class MeetingDigestService:
             reports=reports,
             missing_dates=missing_dates,
         )
+        weekly_task_id = self._ensure_weekly_report_task(
+            week_from=payload.week_from,
+            week_to=payload.week_to,
+            team_name=payload.team_name,
+            description=comment,
+        )
+        subtask_details = self._attach_daily_tasks_to_weekly(weekly_task_id, reports)
+        telegram_text = self.completion_reports.format_weekly_telegram(
+            week_from=payload.week_from,
+            week_to=payload.week_to,
+            team_name=payload.team_name,
+            reports=reports,
+            missing_dates=missing_dates,
+            weekly_task_id=weekly_task_id,
+            weekly_task_url=self._task_url(weekly_task_id),
+        )
         telegram_result = None
-        weekly_task_id = self._weekly_task_id(payload.week_from, payload.week_to)
-
-        if existing and not payload.force:
-            return SyncResult(
-                action="weekly_report_skipped",
-                task_id=weekly_task_id,
-                task_url=self._task_url(weekly_task_id) if weekly_task_id else None,
-                title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
-                source_type=source_type,
-                source_key=source_key,
-                details=self._weekly_report_details(reports) | {
-                    "reason": "already_reported",
-                    "telegram_text": comment,
-                    "missing_dates": [item.isoformat() for item in missing_dates],
-                },
-            )
-
-        did_comment = False
-        if weekly_task_id:
-            self._send_task_comment(weekly_task_id, comment)
-            did_comment = True
         if payload.send_telegram:
-            telegram_result = self._send_telegram_report(comment)
-        if did_comment or telegram_result:
-            self.state.upsert_task_binding(
-                source_type=source_type,
-                source_key=source_key,
-                bitrix_task_id=weekly_task_id or 0,
-                mode="reported",
-                title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
-                meta=self._weekly_report_details(reports) | {
-                    "week_from": payload.week_from.isoformat(),
-                    "week_to": payload.week_to.isoformat(),
-                    "team_name": payload.team_name,
-                    "missing_dates": [item.isoformat() for item in missing_dates],
-                    "telegram": telegram_result,
-                    "telegram_text": comment,
-                },
-            )
+            telegram_result = self._send_telegram_report(telegram_text)
+        self.state.upsert_task_binding(
+            source_type=source_type,
+            source_key=source_key,
+            bitrix_task_id=weekly_task_id,
+            mode="reported",
+            title=self._weekly_report_title(payload.week_from, payload.week_to, payload.team_name),
+            meta=self._weekly_report_details(reports) | {
+                "week_from": payload.week_from.isoformat(),
+                "week_to": payload.week_to.isoformat(),
+                "team_name": payload.team_name,
+                "missing_dates": [item.isoformat() for item in missing_dates],
+                "telegram": telegram_result,
+                "telegram_text": telegram_text,
+                "full_report_text": comment,
+                "subtasks": subtask_details,
+            },
+        )
         return SyncResult(
             action="weekly_reported",
             task_id=weekly_task_id,
-            task_url=self._task_url(weekly_task_id) if weekly_task_id else None,
-            title=f"Итоги недели {payload.week_from.strftime('%d.%m')} - {payload.week_to.strftime('%d.%m.%Y')}",
+            task_url=self._task_url(weekly_task_id),
+            title=self._weekly_report_title(payload.week_from, payload.week_to, payload.team_name),
             source_type=source_type,
             source_key=source_key,
             details=self._weekly_report_details(reports)
             | {
                 "missing_dates": [item.isoformat() for item in missing_dates],
                 "telegram": telegram_result,
-                "telegram_text": comment,
+                "telegram_text": telegram_text,
+                "subtasks": subtask_details,
             },
         )
 
@@ -483,12 +479,70 @@ class MeetingDigestService:
             source_type="daily_plan",
             source_key=f"{report_date.isoformat()}:{team_name}",
         )
-        if not binding:
-            return None
+        if binding:
+            try:
+                task_id = int(binding["bitrix_task_id"])
+            except (TypeError, ValueError):
+                task_id = 0
+            if task_id and self._task_exists(task_id):
+                return task_id
+
+        task_id = self._find_daily_plan_task_id_in_crm(report_date, team_name)
+        if task_id:
+            self.state.upsert_task_binding(
+                source_type="daily_plan",
+                source_key=f"{report_date.isoformat()}:{team_name}",
+                bitrix_task_id=task_id,
+                mode="found_in_crm",
+                title=f"План дня {report_date.strftime('%d.%m.%Y')} / {team_name}",
+                meta={"report_date": report_date.isoformat(), "team_name": team_name, "fallback": "crm_title_search"},
+            )
+        return task_id
+
+    def _find_daily_plan_task_id_in_crm(self, report_date: date, team_name: str) -> int | None:
         try:
-            return int(binding["bitrix_task_id"])
-        except (TypeError, ValueError):
+            data = self.bitrix.list_tasks(
+                filter_data={"GROUP_ID": self.settings.bitrix_group_id},
+                order={"ID": "desc"},
+                select=["ID", "TITLE", "GROUP_ID"],
+            )
+        except Exception:
             return None
+        result = data.get("result") or {}
+        tasks = result.get("tasks") if isinstance(result, dict) else result
+        if not isinstance(tasks, list):
+            return None
+        date_token = report_date.strftime("%d.%m.%Y")
+        short_date_token = report_date.strftime("%d.%m")
+        team_token = team_name.casefold().strip()
+        candidates: list[tuple[int, int]] = []
+        for task in tasks:
+            raw_title = str(task.get("title") or task.get("TITLE") or "").strip()
+            title = raw_title.casefold()
+            if "итоги недели" in title or "weekly" in title:
+                continue
+            if "план дня" not in title:
+                continue
+            if team_token and team_token not in title:
+                continue
+            score = 0
+            if date_token in raw_title:
+                score += 10
+            if short_date_token in raw_title:
+                score += 5
+            if "#daily" in title:
+                score += 1
+            if not score:
+                continue
+            task_id = task.get("id") or task.get("ID")
+            try:
+                candidates.append((score, int(task_id)))
+            except (TypeError, ValueError):
+                continue
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
 
     def _weekly_task_id(self, week_from: date, week_to: date) -> int | None:
         binding = self.state.get_task_binding(
@@ -502,6 +556,69 @@ class MeetingDigestService:
         except (TypeError, ValueError):
             return None
         return task_id if task_id and self._task_exists(task_id) else None
+
+    def _weekly_report_task_id(self, week_from: date, week_to: date, team_name: str) -> int | None:
+        binding = self.state.get_task_binding(
+            source_type="daily_plan_weekly_report",
+            source_key=f"{week_from.isoformat()}:{week_to.isoformat()}:{team_name}",
+        )
+        if not binding:
+            return None
+        try:
+            task_id = int(binding["bitrix_task_id"])
+        except (TypeError, ValueError):
+            return None
+        return task_id if task_id and self._task_exists(task_id) else None
+
+    def _ensure_weekly_report_task(
+        self,
+        *,
+        week_from: date,
+        week_to: date,
+        team_name: str,
+        description: str,
+    ) -> int:
+        task_id = self._weekly_report_task_id(week_from, week_to, team_name) or self._weekly_task_id(week_from, week_to)
+        draft = TaskDraft(
+            title=self._weekly_report_title(week_from, week_to, team_name),
+            description=description,
+            tags=[*self.settings.bitrix_tags, "weekly-report"],
+            meta={
+                "weekly_report": True,
+                "week_from": week_from.isoformat(),
+                "week_to": week_to.isoformat(),
+                "team_name": team_name,
+            },
+        )
+        if task_id:
+            self.bitrix.update_task(task_id, self._task_update_fields(draft))
+            return task_id
+        return self._create_task(draft)
+
+    def _attach_daily_tasks_to_weekly(
+        self,
+        weekly_task_id: int,
+        reports: list[DailyCompletionReport],
+    ) -> list[dict[str, Any]]:
+        details: list[dict[str, Any]] = []
+        for report in reports:
+            item: dict[str, Any] = {
+                "report_date": report.report_date.isoformat(),
+                "task_id": report.task_id,
+                "task_url": report.task_url,
+            }
+            try:
+                self.bitrix.set_task_parent(report.task_id, weekly_task_id)
+                item["attached"] = True
+            except Exception as exc:
+                item["attached"] = False
+                item["error"] = str(exc)
+            details.append(item)
+        return details
+
+    @staticmethod
+    def _weekly_report_title(week_from: date, week_to: date, team_name: str) -> str:
+        return f"Итоги недели {week_from.strftime('%d.%m')} - {week_to.strftime('%d.%m.%Y')} / {team_name}"
 
     @staticmethod
     def _weekly_report_details(reports: list[DailyCompletionReport]) -> dict[str, Any]:

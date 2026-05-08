@@ -98,6 +98,12 @@ class BitrixClient:
         except Exception:
             return self.call("task.item.update", {"taskId": task_id, "fields": fields})
 
+    def set_task_parent(self, task_id: int, parent_task_id: int) -> dict[str, Any]:
+        try:
+            return self.update_task(task_id, {"PARENT_ID": parent_task_id})
+        except Exception:
+            return self.update_task(task_id, {"parentId": parent_task_id})
+
     def add_checklist_item(
         self,
         task_id: int,
