@@ -30,7 +30,7 @@ from .models import (
     WeeklyRollup,
 )
 from .state_db import StateRepository
-from .task_drafts import build_daily_plan_task_draft, build_daily_task_draft, build_meeting_task_draft, build_weekly_task_draft
+from .task_drafts import build_daily_plan_task_draft, build_daily_task_draft, build_meeting_task_draft
 from .task_matching import find_task_matches
 from .weekly_llm import WeeklyLLMConfig, WeeklyRollupLLM
 
@@ -125,26 +125,14 @@ class MeetingDigestService:
         return result
 
     def sync_week(self, payload: WeekSyncRequest) -> SyncResult:
-        meetings = self.aicallorder.list_meetings_between(payload.week_from, payload.week_to)
-        rollup = self._build_weekly_rollup(payload.week_from, payload.week_to, meetings)
-        draft = build_weekly_task_draft(rollup=rollup, default_tags=self.settings.bitrix_tags)
-        source_type = "weekly_digest"
-        source_key = f"{payload.week_from.isoformat()}:{payload.week_to.isoformat()}"
-        result = self._apply_task_draft(
-            draft=draft,
-            source_type=source_type,
-            source_key=source_key,
-            action=payload.action,
-            explicit_task_id=payload.task_id,
+        return self.run_weekly_report(
+            WeeklyReportRequest(
+                week_from=payload.week_from,
+                week_to=payload.week_to,
+                force=True,
+                send_telegram=False,
+            )
         )
-        self.state.save_weekly_rollup(
-            week_from=payload.week_from.isoformat(),
-            week_to=payload.week_to.isoformat(),
-            summary=rollup.model_dump(),
-            source_meeting_ids=rollup.source_meeting_ids,
-            bitrix_task_id=result.task_id,
-        )
-        return result
 
     def sync_day(self, payload: DaySyncRequest) -> SyncResult:
         meetings = self.aicallorder.list_meetings_between(payload.report_date, payload.report_date)
