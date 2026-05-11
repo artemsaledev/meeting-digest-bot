@@ -71,6 +71,7 @@ def import_aicallorder_archive(
     source_url: str = "",
     dry_run: bool = False,
     limit: int | None = None,
+    include_untagged: bool = False,
     build_rag: bool = False,
     export_target: str = "none",
     sync_notion: bool = False,
@@ -78,6 +79,16 @@ def import_aicallorder_archive(
 ) -> AicallorderArchiveImportResult:
     text = source_file.read_text(encoding="utf-8-sig")
     blocks = parse_aicallorder_archive(text)
+    skipped_blocks: list[dict[str, str]] = []
+    if not include_untagged:
+        filtered: list[ArchiveBlock] = []
+        for block in blocks:
+            tags = {tag.casefold() for tag in _tags(block.title)}
+            if {DEMO_TAG, DISCUSSION_TAG} & tags:
+                filtered.append(block)
+            else:
+                skipped_blocks.append({"loom_id": block.loom_id, "title": block.title, "reason": "missing task tag"})
+        blocks = filtered
     if limit is not None:
         blocks = blocks[:limit]
     objects = [archive_block_to_knowledge_object(block, source_url=source_url) for block in blocks]
@@ -88,6 +99,7 @@ def import_aicallorder_archive(
         blocks_count=len(blocks),
         objects_count=len(objects),
         object_ids=[item.object_id for item in objects],
+        skipped_blocks=skipped_blocks,
     )
     if dry_run:
         return result

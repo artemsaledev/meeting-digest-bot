@@ -91,6 +91,29 @@ class AicallorderArchiveTests(unittest.TestCase):
             self.assertTrue((root / "kb" / "indexes" / "knowledge_index.json").exists())
             self.assertTrue((root / "kb" / "indexes" / "knowledge_chunks.json").exists())
 
+    def test_import_skips_untagged_daily_blocks_by_default(self) -> None:
+        text = ARCHIVE_TEXT + """\n[[LOOM_VIDEO_ID:daily123]]
+Meeting Note: Daily 16.04 Yavdokimenko план на день
+
+Metadata
+- Loom video ID: daily123
+
+Summary
+Планирование дня.
+[[/LOOM_VIDEO_ID:daily123]]
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "archive.txt"
+            source.write_text(text, encoding="utf-8")
+
+            result = import_aicallorder_archive(source_file=source, knowledge_dir=root / "kb", dry_run=True)
+
+            self.assertEqual(result.blocks_count, 1)
+            self.assertEqual(result.objects_count, 1)
+            self.assertEqual(len(result.skipped_blocks), 1)
+            self.assertEqual(result.skipped_blocks[0]["loom_id"], "daily123")
+
 
 if __name__ == "__main__":
     unittest.main()

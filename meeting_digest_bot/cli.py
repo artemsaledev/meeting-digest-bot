@@ -187,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     archive_import.add_argument("--knowledge-dir", default="company-knowledge")
     archive_import.add_argument("--limit", type=int)
     archive_import.add_argument("--dry-run", action="store_true")
+    archive_import.add_argument("--include-untagged", action="store_true")
     archive_import.add_argument("--build-rag", action="store_true")
     archive_import.add_argument("--export-target", choices=["none", "notebooklm", "agents"], default="none")
     archive_import.add_argument("--sync-notion", action="store_true")
@@ -552,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
             knowledge_dir=Path(args.knowledge_dir),
             dry_run=args.dry_run,
             limit=args.limit,
+            include_untagged=args.include_untagged,
             build_rag=args.build_rag,
             export_target=args.export_target,
             sync_notion=args.sync_notion,
