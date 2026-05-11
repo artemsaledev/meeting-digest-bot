@@ -1357,7 +1357,7 @@ class KnowledgeRepository:
 
     @staticmethod
     def _chunks_for_object(data: dict[str, Any]) -> list[str]:
-        chunks = [
+        chunks = KnowledgeRepository._split_chunk_text(
             "\n".join(
                 [
                     str(data.get("title") or ""),
@@ -1368,10 +1368,11 @@ class KnowledgeRepository:
                     "\n".join(data.get("acceptance_criteria") or []),
                 ]
             ).strip()
-        ]
+        )
         for event in data.get("source_events", []):
             if isinstance(event, dict):
-                chunks.append(
+                chunks.extend(
+                    KnowledgeRepository._split_chunk_text(
                     "\n".join(
                         [
                             str(event.get("event_id") or ""),
@@ -1381,8 +1382,43 @@ class KnowledgeRepository:
                             "\n".join(event.get("decisions") or []),
                         ]
                     ).strip()
+                    )
                 )
         return [chunk for chunk in chunks if chunk]
+
+    @staticmethod
+    def _split_chunk_text(text: str, *, max_chars: int = 12000) -> list[str]:
+        text = str(text or "").strip()
+        if not text:
+            return []
+        if len(text) <= max_chars:
+            return [text]
+        parts: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for paragraph in re.split(r"\n{2,}", text):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            if len(paragraph) > max_chars:
+                if current:
+                    parts.append("\n\n".join(current).strip())
+                    current = []
+                    current_len = 0
+                for start in range(0, len(paragraph), max_chars):
+                    parts.append(paragraph[start : start + max_chars].strip())
+                continue
+            next_len = current_len + len(paragraph) + (2 if current else 0)
+            if current and next_len > max_chars:
+                parts.append("\n\n".join(current).strip())
+                current = [paragraph]
+                current_len = len(paragraph)
+            else:
+                current.append(paragraph)
+                current_len = next_len
+        if current:
+            parts.append("\n\n".join(current).strip())
+        return [part for part in parts if part]
 
     @staticmethod
     def _source_event_ids(data: dict[str, Any]) -> list[str]:
