@@ -112,10 +112,16 @@ def import_aicallorder_archive(
     if build_rag:
         from .knowledge_rag import KnowledgeVectorStore, client_from_env
 
-        result.rag_index = KnowledgeVectorStore(knowledge_dir).build_from_chunk_index(
-            client=client_from_env(env or {}),
-            force=False,
-        )
+        rag_client = client_from_env(env or {})
+        if not rag_client:
+            result.rag_index = {"ready": False, "missing_env": ["KNOWLEDGE_RAG_API_KEY or OPENAI_API_KEY or LLM_API_KEY"]}
+        else:
+            db_path = Path(env["KNOWLEDGE_VECTOR_DB_PATH"]) if env and env.get("KNOWLEDGE_VECTOR_DB_PATH") else None
+            result.rag_index = KnowledgeVectorStore(
+                knowledge_dir,
+                db_path=db_path,
+                embeddings_model=rag_client.embeddings_model,
+            ).build(client=rag_client, force=False)
     if export_target != "none":
         result.external_export = repo.export_external_bundle(target=export_target).model_dump()
     if sync_notion:
