@@ -7,6 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Settings
+from .aicallorder_archive import import_aicallorder_archive
 from .kb_intake import KnowledgeIntake
 from .knowledge_alerts import (
     format_failure_alert,
@@ -179,6 +180,16 @@ def build_parser() -> argparse.ArgumentParser:
     export_external.add_argument("--system")
     export_external.add_argument("--feature-area")
     export_external.add_argument("--object-type")
+
+    archive_import = subparsers.add_parser("import-aicallorder-archive")
+    archive_import.add_argument("--source-file", required=True)
+    archive_import.add_argument("--source-url", default="")
+    archive_import.add_argument("--knowledge-dir", default="company-knowledge")
+    archive_import.add_argument("--limit", type=int)
+    archive_import.add_argument("--dry-run", action="store_true")
+    archive_import.add_argument("--build-rag", action="store_true")
+    archive_import.add_argument("--export-target", choices=["none", "notebooklm", "agents"], default="none")
+    archive_import.add_argument("--sync-notion", action="store_true")
 
     notion_sync = subparsers.add_parser("sync-knowledge-notion")
     notion_sync.add_argument("--knowledge-dir", default="company-knowledge")
@@ -528,6 +539,23 @@ def main(argv: list[str] | None = None) -> int:
             system=args.system,
             feature_area=args.feature_area,
             object_type=args.object_type,
+        )
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "import-aicallorder-archive":
+        import os
+
+        result = import_aicallorder_archive(
+            source_file=Path(args.source_file),
+            source_url=args.source_url,
+            knowledge_dir=Path(args.knowledge_dir),
+            dry_run=args.dry_run,
+            limit=args.limit,
+            build_rag=args.build_rag,
+            export_target=args.export_target,
+            sync_notion=args.sync_notion,
+            env=dict(os.environ),
         )
         print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
         return 0
