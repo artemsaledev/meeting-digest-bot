@@ -1,9 +1,8 @@
 [Unit]
-Description=Run MeetingDigestBot Notion back-import checks periodically
+Description=Run MeetingDigestBot Notion back-import checks twice daily
 
 [Timer]
-OnBootSec=10min
-OnUnitActiveSec=30min
+OnCalendar=*-*-* 10,18:00:00 Europe/Kyiv
 Persistent=true
 Unit=meeting-digest-bot-knowledge-import.service
 
