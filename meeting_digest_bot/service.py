@@ -1083,7 +1083,7 @@ class MeetingDigestService:
         result: list[str] = []
         for group in draft.checklist_groups:
             for item in group.items:
-                text = self._checklist_item_title(item)
+                text = MeetingDigestService._checklist_item_title(item)
                 if text:
                     result.append(f"{group.title}: {text}")
         return result
