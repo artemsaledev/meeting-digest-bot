@@ -9,5 +9,4 @@ WorkingDirectory=/opt/meeting-digest-bot
 EnvironmentFile=/opt/meeting-digest-bot/.env
 EnvironmentFile=-/opt/meeting-digest-bot/knowledge-pipeline.env
 TimeoutStartSec=25min
-ExecStart=/bin/bash -lc '/opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot process-knowledge-pipeline --knowledge-dir "${KNOWLEDGE_REPO_PATH:-/opt/company-knowledge}" --export-target notebooklm'
-ExecStartPost=-/bin/bash -lc 'timeout 20m /opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot sync-knowledge-notion --knowledge-dir "${KNOWLEDGE_REPO_PATH:-/opt/company-knowledge}" --apply >> /var/log/meeting-digest-bot-knowledge-notion-sync.log 2>&1'
+ExecStart=/bin/bash -lc '/opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot process-knowledge-pipeline --knowledge-dir "${KNOWLEDGE_REPO_PATH:-/opt/company-knowledge}" --export-target notebooklm --sync-notion'

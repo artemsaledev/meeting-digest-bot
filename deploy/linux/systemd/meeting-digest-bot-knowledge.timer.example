@@ -1,9 +1,11 @@
 [Unit]
-Description=Run MeetingDigestBot knowledge pipeline every 30 minutes
+Description=Run MeetingDigestBot knowledge pipeline periodically
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=30min
+OnActiveSec=15min
+OnUnitActiveSec=15min
+Unit=meeting-digest-bot-knowledge.service
 Persistent=true
 
 [Install]

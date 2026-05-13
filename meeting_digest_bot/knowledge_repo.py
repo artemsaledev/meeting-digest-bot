@@ -638,8 +638,15 @@ class KnowledgeRepository:
             object_ids=[str(item["object_id"]) for item in objects],
         )
 
-    def notion_sync_plan(self, *, apply: bool = False, env: dict[str, str] | None = None) -> KnowledgeNotionResult:
+    def notion_sync_plan(
+        self,
+        *,
+        apply: bool = False,
+        env: dict[str, str] | None = None,
+        object_ids: list[str] | None = None,
+    ) -> KnowledgeNotionResult:
         env = env or {}
+        selected_object_ids = {item.strip() for item in (object_ids or []) if item.strip()}
         self._read_json(self.root / "meta" / "notion_mapping.json") or self._default_notion_mapping()
         targets = {database: NotionTarget.from_env(env, key=key) for database, key in NOTION_TARGET_KEYS.items()}
         planned = []
@@ -650,6 +657,8 @@ class KnowledgeRepository:
             "Instructions": "instructions",
         }.items():
             for path in sorted((self.root / "knowledge" / rel_dir).glob("*.notion.json")):
+                if selected_object_ids and path.name.removesuffix(".notion.json") not in selected_object_ids:
+                    continue
                 planned.append({"action": "upsert_page", "path": str(path), "database": database})
         missing = []
         if not env.get("NOTION_API_KEY"):

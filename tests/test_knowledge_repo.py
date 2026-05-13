@@ -158,6 +158,21 @@ class KnowledgeRepositoryTests(unittest.TestCase):
             self.assertTrue(full_dry.ready)
             self.assertEqual(len(full_dry.planned_pages), 4)
 
+            filtered_dry = repo.notion_sync_plan(
+                apply=False,
+                env={
+                    "NOTION_API_KEY": "secret",
+                    "NOTION_DATA_SOURCE_TASK_CASES": "ds-task",
+                    "NOTION_DATA_SOURCE_SYSTEMS": "ds-systems",
+                    "NOTION_DATA_SOURCE_FEATURES": "ds-features",
+                    "NOTION_DATA_SOURCE_INSTRUCTIONS": "ds-instructions",
+                },
+                object_ids=["task_case__bitrix_123"],
+            )
+            self.assertTrue(filtered_dry.ready)
+            self.assertEqual(len(filtered_dry.planned_pages), 1)
+            self.assertTrue(filtered_dry.planned_pages[0]["path"].endswith("task_case__bitrix_123.notion.json"))
+
     def test_notion_import_proposal_detects_manual_markdown_edits(self) -> None:
         class FakeClient:
             def query_pages(self) -> list[dict]:

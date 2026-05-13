@@ -195,6 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     notion_sync = subparsers.add_parser("sync-knowledge-notion")
     notion_sync.add_argument("--knowledge-dir", default="company-knowledge")
     notion_sync.add_argument("--apply", action="store_true")
+    notion_sync.add_argument("--object-id", action="append", default=[])
 
     notion_import = subparsers.add_parser("import-knowledge-notion")
     notion_import.add_argument("--knowledge-dir", default="company-knowledge")
@@ -229,6 +230,8 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--limit", type=int)
     pipeline.add_argument("--skip-backfill", action="store_true")
     pipeline.add_argument("--export-target", choices=["none", "notebooklm", "agents"], default="none")
+    pipeline.add_argument("--sync-notion", action="store_true")
+    pipeline.add_argument("--reprocess-all", action="store_true")
 
     backfill_tags = subparsers.add_parser("backfill-knowledge-tags")
     backfill_tags.add_argument("--limit", type=int)
@@ -565,7 +568,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sync-knowledge-notion":
         import os
 
-        result = KnowledgeRepository(Path(args.knowledge_dir)).notion_sync_plan(apply=args.apply, env=dict(os.environ))
+        result = KnowledgeRepository(Path(args.knowledge_dir)).notion_sync_plan(
+            apply=args.apply,
+            env=dict(os.environ),
+            object_ids=args.object_id,
+        )
         if args.apply and not result.ready:
             print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
             return 2
@@ -663,35 +670,67 @@ def main(argv: list[str] | None = None) -> int:
             intake = KnowledgeIntake(service)
             if not args.skip_backfill:
                 summary["backfill"] = intake.backfill_source_tags(limit=args.limit).model_dump()
-            objects = intake.collect(limit=args.limit)
+            if args.reprocess_all:
+                objects = intake.collect(limit=args.limit)
+                summary["candidate_mode"] = {"mode": "reprocess_all", "objects": len(objects)}
+            else:
+                pending_candidates = service.state.list_kb_candidates(status="pending")
+                if args.limit:
+                    pending_candidates = pending_candidates[: args.limit]
+                objects = []
+                for candidate in pending_candidates:
+                    objects.extend(intake.collect(post_url=str(candidate["post_url"])))
+                summary["candidate_mode"] = {
+                    "mode": "pending",
+                    "pending": len(pending_candidates),
+                    "objects": len(objects),
+                    "post_urls": [str(item["post_url"]) for item in pending_candidates],
+                }
             repo = KnowledgeRepository(Path(args.knowledge_dir))
-            summary["upsert"] = repo.upsert_objects(objects).model_dump()
-            for item in objects:
-                for post_url in item.linked_telegram_posts:
-                    service.state.update_kb_candidate_status(post_url=post_url, status="exported")
-            summary["derive_catalogs"] = repo.derive_catalogs().model_dump()
-            summary["index"] = repo.build_index().model_dump()
-            summary["chunk_index"] = repo.build_chunk_index().model_dump()
-            import os
+            if not objects:
+                summary["upsert"] = {
+                    "root": str(repo.root),
+                    "created_dirs": [],
+                    "written_files": [],
+                    "objects_count": 0,
+                    "object_ids": [],
+                }
+            else:
+                summary["upsert"] = repo.upsert_objects(objects).model_dump()
+                for item in objects:
+                    for post_url in item.linked_telegram_posts:
+                        service.state.update_kb_candidate_status(post_url=post_url, status="exported")
+                summary["derive_catalogs"] = repo.derive_catalogs().model_dump()
+                summary["index"] = repo.build_index().model_dump()
+                summary["chunk_index"] = repo.build_chunk_index().model_dump()
+                import os
 
-            if str(os.environ.get("KNOWLEDGE_RAG_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"}:
-                rag_client = client_from_env(dict(os.environ))
-                if rag_client:
-                    summary["rag_index"] = KnowledgeVectorStore(
-                        repo.root,
-                        db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
-                        embeddings_model=rag_client.embeddings_model,
-                    ).build(client=rag_client)
-                else:
-                    summary["rag_index"] = {
-                        "ready": False,
-                        "missing_env": ["KNOWLEDGE_RAG_API_KEY or OPENAI_API_KEY or LLM_API_KEY"],
-                    }
-            for item in objects:
-                for post_url in item.linked_telegram_posts:
-                    service.state.update_kb_candidate_status(post_url=post_url, status="indexed")
-            if args.export_target != "none":
-                summary["external_export"] = repo.export_external_bundle(target=args.export_target).model_dump()
+                if str(os.environ.get("KNOWLEDGE_RAG_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"}:
+                    rag_client = client_from_env(dict(os.environ))
+                    if rag_client:
+                        summary["rag_index"] = KnowledgeVectorStore(
+                            repo.root,
+                            db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
+                            embeddings_model=rag_client.embeddings_model,
+                        ).build(client=rag_client)
+                    else:
+                        summary["rag_index"] = {
+                            "ready": False,
+                            "missing_env": ["KNOWLEDGE_RAG_API_KEY or OPENAI_API_KEY or LLM_API_KEY"],
+                        }
+                for item in objects:
+                    for post_url in item.linked_telegram_posts:
+                        service.state.update_kb_candidate_status(post_url=post_url, status="indexed")
+                if args.export_target != "none":
+                    summary["external_export"] = repo.export_external_bundle(target=args.export_target).model_dump()
+                if args.sync_notion:
+                    import os
+
+                    summary["notion_sync"] = repo.notion_sync_plan(
+                        apply=True,
+                        env=dict(os.environ),
+                        object_ids=sorted({item.object_id for item in objects}),
+                    ).model_dump()
         except Exception as exc:
             status = "error"
             summary["error"] = str(exc)
