@@ -1,0 +1,21 @@
+[Unit]
+Description=NotebookLM Agent Task Extractor watcher
+After=network-online.target notebooklm-agent-xvfb.service
+Wants=network-online.target
+Requires=notebooklm-agent-xvfb.service
+
+[Service]
+Type=simple
+User=notebooklm-agent
+Group=meetingdigest
+WorkingDirectory=/opt/meeting-digest-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=DISPLAY=:98
+EnvironmentFile=-/opt/meeting-digest-bot/data/notebooklm-agent.env
+ExecStart=/opt/meeting-digest-bot/.venv/bin/python -m meeting_digest_bot notebooklm-agent watch --exports-root /opt/meeting-digest-bot/exports/task_extractor --profile-dir /opt/meeting-digest-bot/data/notebooklm-browser-profile --interval 60 --limit 1
+Restart=always
+RestartSec=10
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

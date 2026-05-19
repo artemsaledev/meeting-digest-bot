@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,7 +19,8 @@ from .knowledge_alerts import (
 )
 from .knowledge_rag import KnowledgeVectorStore, client_from_env
 from .knowledge_repo import KnowledgeRepository
-from .models import DailyPlanSyncRequest, DailyReportRequest, PostSyncRequest, PublicationRegistrationRequest, SyncAction, WeekSyncRequest, WeeklyReportRequest
+from .models import DailyPlanSyncRequest, DailyReportRequest, PostSyncRequest, PublicationRegistrationRequest, SyncAction, TaskExtractorAction, TaskExtractorRequest, WeekSyncRequest, WeeklyReportRequest
+from .notebooklm_agent import NotebookLMAgent, RemoteTaskExtractorConfig
 from .service import MeetingDigestService
 from .telegram_bot import TelegramBotFacade
 from .telegram_poller import TelegramPollingWorker
@@ -87,6 +89,40 @@ def build_parser() -> argparse.ArgumentParser:
     poll.add_argument("--limit", type=int, default=20)
     poll.add_argument("--timeout", type=int, default=30)
     poll.add_argument("--drop-pending", action="store_true")
+
+    task_poll = subparsers.add_parser("poll-task-extractor")
+    task_poll.add_argument("--once", action="store_true")
+    task_poll.add_argument("--offset", type=int)
+    task_poll.add_argument("--limit", type=int, default=20)
+    task_poll.add_argument("--timeout", type=int, default=30)
+    task_poll.add_argument("--drop-pending", action="store_true")
+
+    task_extractor = subparsers.add_parser("task-extractor")
+    task_extractor.add_argument("action", choices=[item.value for item in TaskExtractorAction])
+    task_extractor.add_argument("--chat-id", default="cli")
+    task_extractor.add_argument("--message-id", default="cli")
+    task_extractor.add_argument("--user-id", default="cli")
+    task_extractor.add_argument("--text", default="")
+    task_extractor.add_argument("--reply-text", default="")
+    task_extractor.add_argument("--task-id", type=int)
+
+    notebooklm = subparsers.add_parser("notebooklm-agent")
+    notebooklm.add_argument("action", choices=["open-auth", "prepare", "create", "watch"])
+    notebooklm.add_argument("--session-id")
+    notebooklm.add_argument("--exports-root", default="exports/task_extractor")
+    notebooklm.add_argument("--profile-dir", default="data/notebooklm-browser-profile")
+    notebooklm.add_argument("--no-prompt", action="store_true")
+    notebooklm.add_argument("--once", action="store_true")
+    notebooklm.add_argument("--interval", type=int, default=60)
+    notebooklm.add_argument("--limit", type=int, default=1)
+    notebooklm.add_argument("--remote-host", default=os.environ.get("TASK_EXTRACTOR_REMOTE_HOST", ""))
+    notebooklm.add_argument("--remote-user", default=os.environ.get("TASK_EXTRACTOR_REMOTE_USER", "root"))
+    notebooklm.add_argument("--remote-password", default=os.environ.get("TASK_EXTRACTOR_REMOTE_PASSWORD", ""))
+    notebooklm.add_argument("--remote-port", type=int, default=int(os.environ.get("TASK_EXTRACTOR_REMOTE_PORT", "22")))
+    notebooklm.add_argument(
+        "--remote-exports-root",
+        default=os.environ.get("TASK_EXTRACTOR_REMOTE_EXPORTS_ROOT", "/opt/meeting-digest-bot/exports/task_extractor"),
+    )
 
     export_knowledge = subparsers.add_parser("export-knowledge")
     export_knowledge.add_argument("--post-url")
@@ -248,6 +284,55 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "notebooklm-agent":
+        agent = NotebookLMAgent(exports_root=Path(args.exports_root), profile_dir=Path(args.profile_dir))
+        if args.action == "open-auth":
+            print(json.dumps(agent.open_auth(), ensure_ascii=False, indent=2))
+            return 0
+        if args.action == "watch":
+            remote = None
+            if args.remote_host:
+                remote = RemoteTaskExtractorConfig(
+                    host=args.remote_host,
+                    username=args.remote_user,
+                    password=args.remote_password,
+                    port=args.remote_port,
+                    remote_exports_root=args.remote_exports_root,
+                )
+            result = agent.watch(
+                once=args.once,
+                interval_seconds=args.interval,
+                limit=args.limit,
+                remote=remote,
+                send_prompt=not args.no_prompt,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if not args.session_id:
+            raise RuntimeError("--session-id is required for notebooklm-agent prepare/create")
+        if args.action == "create":
+            result = agent.create_notebook(session_id=args.session_id, send_prompt=not args.no_prompt)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        package = agent.prepare_package(session_id=args.session_id)
+        print(
+            json.dumps(
+                {
+                    "status": "prepared",
+                    "session_id": package.session_id,
+                    "title": package.title,
+                    "root": str(package.root),
+                    "manifest_path": str(package.manifest_path),
+                    "source_files": [str(path) for path in package.source_files],
+                    "prompt_path": str(package.prompt_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
     settings = Settings.from_env()
     service = MeetingDigestService(settings)
 
@@ -356,6 +441,33 @@ def main(argv: list[str] | None = None) -> int:
             poller.drop_pending_updates()
         result = poller.run(once=args.once, start_offset=args.offset, limit=args.limit)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "poll-task-extractor":
+        token = settings.task_extractor_bot_token
+        if not token:
+            raise RuntimeError("TASK_EXTRACTOR_BOT_TOKEN is not configured.")
+        bot = TelegramBotFacade(service=service, token=token, task_extractor_mode=True)
+        poller = TelegramPollingWorker(bot=bot, poll_timeout_seconds=args.timeout)
+        if args.drop_pending:
+            poller.drop_pending_updates()
+        result = poller.run(once=args.once, start_offset=args.offset, limit=args.limit)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "task-extractor":
+        result = service.task_extractor.handle(
+            TaskExtractorRequest(
+                action=TaskExtractorAction(args.action),
+                chat_id=args.chat_id,
+                message_id=args.message_id,
+                user_id=args.user_id,
+                text=args.text,
+                reply_text=args.reply_text,
+                target_task_id=args.task_id,
+            )
+        )
+        print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "export-knowledge":

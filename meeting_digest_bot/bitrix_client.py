@@ -137,6 +137,17 @@ class BitrixClient:
         result = data.get("result") or []
         return list(result) if isinstance(result, list) else []
 
+    def list_task_comments(self, task_id: int) -> list[dict[str, Any]]:
+        try:
+            data = self.call("task.commentitem.getlist", {"TASKID": task_id})
+        except Exception:
+            data = self.call("task.comment.getlist", {"TASKID": task_id})
+        result = data.get("result") or []
+        if isinstance(result, dict):
+            items = result.get("items") or result.get("comments") or []
+            return list(items) if isinstance(items, list) else []
+        return list(result) if isinstance(result, list) else []
+
     def add_checklist_group(self, task_id: int, title: str, items: list[Any]) -> None:
         parent_id = self.add_checklist_item(task_id, title, parent_id=0)
         for item in items:

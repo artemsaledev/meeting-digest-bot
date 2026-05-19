@@ -100,6 +100,7 @@ class Settings:
     bitrix_daily_plan_accomplice_ids: list[int]
     bitrix_tags: list[str]
     telegram_bot_token: str | None
+    task_extractor_bot_token: str | None
     telegram_webhook_secret: str | None
     telegram_channel_username: str | None
     telegram_report_chat_id: str | None
@@ -177,6 +178,7 @@ class Settings:
             ),
             bitrix_tags=tags,
             telegram_bot_token=get_value("TELEGRAM_BOT_TOKEN"),
+            task_extractor_bot_token=get_value("TASK_EXTRACTOR_BOT_TOKEN") or get_value("TELEGRAM_TASK_EXTRACTOR_BOT_TOKEN"),
             telegram_webhook_secret=get_value("TELEGRAM_WEBHOOK_SECRET"),
             telegram_channel_username=get_value("TELEGRAM_CHANNEL_USERNAME"),
             telegram_report_chat_id=get_value("TELEGRAM_REPORT_CHAT_ID"),

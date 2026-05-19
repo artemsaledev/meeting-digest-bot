@@ -1,0 +1,16 @@
+[Unit]
+Description=NotebookLM Agent virtual display
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=notebooklm-agent
+Group=meetingdigest
+EnvironmentFile=-/opt/meeting-digest-bot/data/notebooklm-agent.env
+ExecStart=/bin/bash -lc 'exec /usr/bin/Xvfb "${NOTEBOOKLM_AGENT_DISPLAY:-:98}" -screen 0 1440x1000x24 -nolisten tcp'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

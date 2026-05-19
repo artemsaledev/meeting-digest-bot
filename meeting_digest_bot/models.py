@@ -210,3 +210,72 @@ class TelegramResponse(BaseModel):
     text: str
     payload: dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TaskExtractorAction(str, Enum):
+    collect = "collect"
+    add = "add"
+    preview = "preview"
+    export = "export"
+    create = "create"
+    update = "update"
+    comment = "comment"
+    checklist = "checklist"
+    clear = "clear"
+    status = "status"
+
+
+class TaskExtractorSource(BaseModel):
+    id: int | None = None
+    session_id: str
+    source_type: str
+    source_key: str
+    source_url: str = ""
+    telegram_chat_id: str = ""
+    telegram_message_id: str = ""
+    loom_video_id: str = ""
+    bitrix_task_id: int | None = None
+    title: str = ""
+    raw_text: str = ""
+    normalized: dict[str, Any] = Field(default_factory=dict)
+    status: str = "collected"
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class TaskExtractorSession(BaseModel):
+    session_id: str
+    chat_id: str
+    root_message_id: str = ""
+    created_by_user_id: str = ""
+    title: str = ""
+    status: str = "collecting"
+    target_task_id: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+    exported_at: str | None = None
+    published_at: str | None = None
+
+
+class TaskExtractorRequest(BaseModel):
+    action: TaskExtractorAction
+    chat_id: str
+    message_id: str = ""
+    user_id: str = ""
+    text: str = ""
+    reply_text: str = ""
+    forward_text: str = ""
+    target_task_id: int | None = None
+    source_url: str = ""
+
+
+class TaskExtractorResult(BaseModel):
+    action: str
+    session: TaskExtractorSession | None = None
+    sources: list[TaskExtractorSource] = Field(default_factory=list)
+    task_id: int | None = None
+    task_url: str | None = None
+    export_dir: str = ""
+    zip_path: str = ""
+    text: str = ""
+    details: dict[str, Any] = Field(default_factory=dict)

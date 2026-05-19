@@ -5,6 +5,7 @@ The production deployment runs on the VPS as two systemd services:
 ```text
 meeting-digest-bot-api.service
 meeting-digest-bot-poller.service
+task-extractor-bot-poller.service
 ```
 
 Recommended paths:
@@ -76,6 +77,7 @@ BITRIX_DEFAULT_AUDITOR_IDS=50760,127124,137230,51977
 BITRIX_DAILY_PLAN_ACCOMPLICE_IDS=51977,58194,127124,114736,137230,50760,123170,120601,426,162783,163323
 
 TELEGRAM_BOT_TOKEN=...
+TASK_EXTRACTOR_BOT_TOKEN=...
 TELEGRAM_REPORT_CHAT_ID=
 MEETING_DIGEST_SHARED_SECRET=...
 ```
@@ -87,9 +89,12 @@ MEETING_DIGEST_SHARED_SECRET=...
 ```bash
 sudo cp deploy/linux/systemd/meeting-digest-bot-api.service.example /etc/systemd/system/meeting-digest-bot-api.service
 sudo cp deploy/linux/systemd/meeting-digest-bot-poller.service.example /etc/systemd/system/meeting-digest-bot-poller.service
+sudo cp deploy/linux/systemd/task-extractor-bot-poller.service.example /etc/systemd/system/task-extractor-bot-poller.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now meeting-digest-bot-api.service
 sudo systemctl enable --now meeting-digest-bot-poller.service
+# Enable this only after TASK_EXTRACTOR_BOT_TOKEN is configured.
+sudo systemctl enable --now task-extractor-bot-poller.service
 ```
 
 ## Cron Reports
@@ -129,7 +134,8 @@ cd /opt/meeting-digest-bot
 curl http://127.0.0.1:8011/health
 systemctl status meeting-digest-bot-api.service
 systemctl status meeting-digest-bot-poller.service
+systemctl status task-extractor-bot-poller.service
 journalctl -u meeting-digest-bot-api.service -n 100 --no-pager
 journalctl -u meeting-digest-bot-poller.service -n 100 --no-pager
+journalctl -u task-extractor-bot-poller.service -n 100 --no-pager
 ```
-

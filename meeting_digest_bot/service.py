@@ -31,6 +31,7 @@ from .models import (
 )
 from .state_db import StateRepository
 from .task_drafts import build_daily_plan_task_draft, build_daily_task_draft, build_meeting_task_draft
+from .task_extractor import TaskExtractorService
 from .task_matching import find_task_matches
 from .weekly_llm import WeeklyLLMConfig, WeeklyRollupLLM
 
@@ -66,6 +67,7 @@ class MeetingDigestService:
             people=self.daily_plan_parser.people,
         )
         self.completion_reports = CompletionReportBuilder()
+        self.task_extractor = TaskExtractorService(self)
 
     def register_publication(self, payload: PublicationRegistrationRequest):
         return self.state.register_publication(payload)

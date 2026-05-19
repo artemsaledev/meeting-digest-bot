@@ -172,6 +172,103 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertEqual(result.payload["intent"], "ask")
             self.assertTrue(bot.messages)
 
+    def test_kb_menu_uses_russian_buttons(self) -> None:
+        bot = FakeTelegramBot()
+        result = bot.process_update({"message": {"message_id": 20, "text": "@LLMeets_bot kb", "chat": {"id": 123}, "from": {"id": 7}}})
+
+        self.assertTrue(result.ok)
+        self.assertIn("База знаний", result.text)
+        self.assertNotIn("kb health |", result.text)
+        keyboard_text = [button["text"] for row in bot.messages[0]["reply_markup"]["inline_keyboard"] for button in row]
+        self.assertIn("Спросить", keyboard_text)
+        self.assertIn("Инструкция", keyboard_text)
+        self.assertIn("ТЗ", keyboard_text)
+        self.assertIn("Правки", keyboard_text)
+
+    def test_callback_instruction_uses_last_answer_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.build_index()
+            repo.build_chunk_index()
+
+            bot = FakeTelegramBot()
+            bot.process_update(
+                {
+                    "message": {
+                        "message_id": 21,
+                        "text": "@LLMeets_bot ask Bitrix checklist",
+                        "chat": {"id": 123},
+                        "from": {"id": 7},
+                    }
+                }
+            )
+            result = bot.process_update(
+                {
+                    "callback_query": {
+                        "id": "cb2",
+                        "data": "kb:instruction",
+                        "from": {"id": 7},
+                        "message": {"chat": {"id": 123}, "text": "Ответ бота по базе знаний"},
+                    }
+                }
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.payload["answer_mode"], "user_instruction")
+            self.assertEqual(result.payload["query"], "Bitrix checklist")
+
+    def test_proposals_are_reviewed_with_buttons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.create_revision_proposal(object_id=knowledge_object().object_id, correction="исправь знание")
+
+            bot = FakeTelegramBot()
+            result = bot.process_update({"message": {"message_id": 22, "text": "kb proposals", "chat": {"id": 123}, "from": {"id": 7}}})
+
+            self.assertTrue(result.ok)
+            self.assertIn("Правки на проверке", result.text)
+            keyboard_text = [button["text"] for row in bot.messages[0]["reply_markup"]["inline_keyboard"] for button in row]
+            self.assertIn("1 Показать", keyboard_text)
+            self.assertIn("1 Принять", keyboard_text)
+            self.assertIn("1 Применить", keyboard_text)
+            self.assertIn("1 Отклонить", keyboard_text)
+
+    def test_revision_creation_returns_buttons_not_manual_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.build_index()
+            repo.build_chunk_index()
+
+            bot = FakeTelegramBot()
+            result = bot.process_update(
+                {
+                    "message": {
+                        "message_id": 23,
+                        "text": "@LLMeets_bot исправь знание: checklist работает иначе",
+                        "chat": {"id": 123},
+                        "from": {"id": 7},
+                    }
+                }
+            )
+
+            self.assertTrue(result.ok)
+            self.assertIn("черновик правки", result.text)
+            self.assertNotIn("kb approve", result.text)
+            keyboard_text = [button["text"] for row in bot.messages[0]["reply_markup"]["inline_keyboard"] for button in row]
+            self.assertIn("Показать diff", keyboard_text)
+            self.assertIn("Применить", keyboard_text)
+
 
 if __name__ == "__main__":
     unittest.main()

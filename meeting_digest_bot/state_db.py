@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import PublicationRecord, PublicationRegistrationRequest
+from .models import PublicationRecord, PublicationRegistrationRequest, TaskExtractorSession, TaskExtractorSource
 
 
 class StateRepository:
@@ -99,6 +99,72 @@ class StateRepository:
                     summary_json TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     finished_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_extractor_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
+                    root_message_id TEXT,
+                    created_by_user_id TEXT,
+                    title TEXT,
+                    status TEXT NOT NULL,
+                    target_task_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    exported_at TEXT,
+                    published_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_extractor_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_key TEXT NOT NULL,
+                    source_url TEXT,
+                    telegram_chat_id TEXT,
+                    telegram_message_id TEXT,
+                    loom_video_id TEXT,
+                    bitrix_task_id INTEGER,
+                    title TEXT,
+                    raw_text TEXT,
+                    normalized_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(session_id, source_type, source_key)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_extractor_exports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    export_type TEXT NOT NULL,
+                    output_dir TEXT NOT NULL,
+                    zip_path TEXT,
+                    manifest_json TEXT NOT NULL,
+                    llm_prompt TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_extractor_publications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    bitrix_task_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 )
                 """
             )
@@ -431,6 +497,273 @@ class StateRepository:
             }
             for row in rows
         ]
+
+    def get_active_task_extractor_session(self, *, chat_id: str) -> TaskExtractorSession | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT session_id, chat_id, root_message_id, created_by_user_id, title, status,
+                       target_task_id, created_at, updated_at, exported_at, published_at
+                FROM task_extractor_sessions
+                WHERE chat_id = ? AND status IN ('collecting', 'ready', 'exported')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (str(chat_id),),
+            ).fetchone()
+        return self._task_extractor_session_from_row(row) if row else None
+
+    def get_task_extractor_session(self, *, session_id: str) -> TaskExtractorSession | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT session_id, chat_id, root_message_id, created_by_user_id, title, status,
+                       target_task_id, created_at, updated_at, exported_at, published_at
+                FROM task_extractor_sessions
+                WHERE session_id = ?
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        return self._task_extractor_session_from_row(row) if row else None
+
+    def create_task_extractor_session(
+        self,
+        *,
+        session_id: str,
+        chat_id: str,
+        root_message_id: str = "",
+        created_by_user_id: str = "",
+        title: str = "",
+    ) -> TaskExtractorSession:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_extractor_sessions (
+                    session_id, chat_id, root_message_id, created_by_user_id, title, status,
+                    target_task_id, created_at, updated_at, exported_at, published_at
+                ) VALUES (?, ?, ?, ?, ?, 'collecting', NULL, ?, ?, NULL, NULL)
+                """,
+                (session_id, str(chat_id), str(root_message_id), str(created_by_user_id), title, now, now),
+            )
+            conn.commit()
+        session = self.get_task_extractor_session(session_id=session_id)
+        if session is None:
+            raise RuntimeError("Task Extractor session creation failed.")
+        return session
+
+    def update_task_extractor_session(
+        self,
+        *,
+        session_id: str,
+        status: str | None = None,
+        title: str | None = None,
+        target_task_id: int | None = None,
+        exported: bool = False,
+        published: bool = False,
+    ) -> TaskExtractorSession:
+        session = self.get_task_extractor_session(session_id=session_id)
+        if session is None:
+            raise ValueError(f"Task Extractor session not found: {session_id}")
+        now = datetime.now(UTC).isoformat()
+        new_status = status or session.status
+        new_title = session.title if title is None else title
+        new_target_task_id = session.target_task_id if target_task_id is None else target_task_id
+        exported_at = now if exported else session.exported_at
+        published_at = now if published else session.published_at
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE task_extractor_sessions
+                SET status = ?, title = ?, target_task_id = ?, updated_at = ?,
+                    exported_at = ?, published_at = ?
+                WHERE session_id = ?
+                """,
+                (new_status, new_title, new_target_task_id, now, exported_at, published_at, session_id),
+            )
+            conn.commit()
+        updated = self.get_task_extractor_session(session_id=session_id)
+        if updated is None:
+            raise RuntimeError("Task Extractor session update failed.")
+        return updated
+
+    def clear_task_extractor_session(self, *, chat_id: str) -> TaskExtractorSession | None:
+        session = self.get_active_task_extractor_session(chat_id=str(chat_id))
+        if session is None:
+            return None
+        return self.update_task_extractor_session(session_id=session.session_id, status="cancelled")
+
+    def upsert_task_extractor_source(self, source: TaskExtractorSource) -> TaskExtractorSource:
+        now = datetime.now(UTC).isoformat()
+        normalized = json.dumps(source.normalized or {}, ensure_ascii=False, default=str)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_extractor_sources (
+                    session_id, source_type, source_key, source_url, telegram_chat_id,
+                    telegram_message_id, loom_video_id, bitrix_task_id, title, raw_text,
+                    normalized_json, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, source_type, source_key) DO UPDATE SET
+                    source_url = COALESCE(excluded.source_url, task_extractor_sources.source_url),
+                    telegram_chat_id = COALESCE(excluded.telegram_chat_id, task_extractor_sources.telegram_chat_id),
+                    telegram_message_id = COALESCE(excluded.telegram_message_id, task_extractor_sources.telegram_message_id),
+                    loom_video_id = COALESCE(excluded.loom_video_id, task_extractor_sources.loom_video_id),
+                    bitrix_task_id = COALESCE(excluded.bitrix_task_id, task_extractor_sources.bitrix_task_id),
+                    title = COALESCE(excluded.title, task_extractor_sources.title),
+                    raw_text = COALESCE(excluded.raw_text, task_extractor_sources.raw_text),
+                    normalized_json = excluded.normalized_json,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source.session_id,
+                    source.source_type,
+                    source.source_key,
+                    source.source_url,
+                    source.telegram_chat_id,
+                    source.telegram_message_id,
+                    source.loom_video_id,
+                    source.bitrix_task_id,
+                    source.title,
+                    source.raw_text,
+                    normalized,
+                    source.status,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        return self.get_task_extractor_source(
+            session_id=source.session_id,
+            source_type=source.source_type,
+            source_key=source.source_key,
+        ) or source
+
+    def get_task_extractor_source(
+        self,
+        *,
+        session_id: str,
+        source_type: str,
+        source_key: str,
+    ) -> TaskExtractorSource | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, session_id, source_type, source_key, source_url, telegram_chat_id,
+                       telegram_message_id, loom_video_id, bitrix_task_id, title, raw_text,
+                       normalized_json, status, created_at, updated_at
+                FROM task_extractor_sources
+                WHERE session_id = ? AND source_type = ? AND source_key = ?
+                LIMIT 1
+                """,
+                (session_id, source_type, source_key),
+            ).fetchone()
+        return self._task_extractor_source_from_row(row) if row else None
+
+    def list_task_extractor_sources(self, *, session_id: str) -> list[TaskExtractorSource]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, session_id, source_type, source_key, source_url, telegram_chat_id,
+                       telegram_message_id, loom_video_id, bitrix_task_id, title, raw_text,
+                       normalized_json, status, created_at, updated_at
+                FROM task_extractor_sources
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [self._task_extractor_source_from_row(row) for row in rows]
+
+    def write_task_extractor_export(
+        self,
+        *,
+        session_id: str,
+        export_type: str,
+        output_dir: str,
+        zip_path: str,
+        manifest: dict[str, Any],
+        llm_prompt: str,
+        status: str = "exported",
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_extractor_exports (
+                    session_id, export_type, output_dir, zip_path, manifest_json,
+                    llm_prompt, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    export_type,
+                    output_dir,
+                    zip_path,
+                    json.dumps(manifest, ensure_ascii=False, default=str),
+                    llm_prompt,
+                    status,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def write_task_extractor_publication(
+        self,
+        *,
+        session_id: str,
+        bitrix_task_id: int,
+        action: str,
+        result: dict[str, Any],
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_extractor_publications (session_id, bitrix_task_id, action, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_id, bitrix_task_id, action, json.dumps(result, ensure_ascii=False, default=str), now),
+            )
+            conn.commit()
+
+    @staticmethod
+    def _task_extractor_session_from_row(row: sqlite3.Row | tuple) -> TaskExtractorSession:
+        return TaskExtractorSession(
+            session_id=row[0],
+            chat_id=row[1],
+            root_message_id=row[2] or "",
+            created_by_user_id=row[3] or "",
+            title=row[4] or "",
+            status=row[5],
+            target_task_id=row[6],
+            created_at=row[7],
+            updated_at=row[8],
+            exported_at=row[9],
+            published_at=row[10],
+        )
+
+    @staticmethod
+    def _task_extractor_source_from_row(row: sqlite3.Row | tuple) -> TaskExtractorSource:
+        return TaskExtractorSource(
+            id=row[0],
+            session_id=row[1],
+            source_type=row[2],
+            source_key=row[3],
+            source_url=row[4] or "",
+            telegram_chat_id=row[5] or "",
+            telegram_message_id=row[6] or "",
+            loom_video_id=row[7] or "",
+            bitrix_task_id=row[8],
+            title=row[9] or "",
+            raw_text=row[10] or "",
+            normalized=StateRepository._safe_json_load(row[11]),
+            status=row[12],
+            created_at=row[13],
+            updated_at=row[14],
+        )
 
     @staticmethod
     def _safe_json_load(raw: str | None) -> dict[str, Any]:

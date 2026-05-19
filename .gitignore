@@ -7,6 +7,7 @@ ssh.txt
 
 # Runtime state
 data/
+exports/
 *.db
 *.sqlite
 *.sqlite3
@@ -32,4 +33,3 @@ env/
 Thumbs.db
 .idea/
 .vscode/
-
