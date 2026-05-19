@@ -307,6 +307,62 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertEqual(result.payload["intent"], "ask")
             self.assertNotIn("Не удалось распознать ссылку", result.text)
 
+    def test_rag_answer_shows_notebooklm_queue_status_and_button(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            notebook_root = Path(tmp) / "exports" / "task_extractor"
+            session_root = notebook_root / "company-knowledge"
+            (session_root / "machine_bundle").mkdir(parents=True)
+            (session_root / "prompt_workspace").mkdir()
+            (session_root / "machine_bundle" / "handoff_manifest.json").write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "KNOWLEDGE_REPO_PATH": tmp,
+                    "KNOWLEDGE_RAG_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                    "LLM_API_KEY": "",
+                    "KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT": str(notebook_root),
+                    "KNOWLEDGE_NOTEBOOKLM_SESSION_ID": "company-knowledge",
+                },
+                clear=False,
+            ):
+                repo = KnowledgeRepository(Path(tmp))
+                repo.upsert_objects([knowledge_object()])
+                repo.build_index()
+                repo.build_chunk_index()
+
+                bot = FakeTelegramBot()
+                result = bot.process_update(
+                    {
+                        "message": {
+                            "message_id": 26,
+                            "text": "@LLMeets_bot Bitrix checklist",
+                            "chat": {"id": 123},
+                            "from": {"id": 7},
+                        }
+                    }
+                )
+
+                self.assertTrue(result.ok)
+                self.assertIn("NotebookLM", result.text)
+                self.assertTrue(result.payload["notebooklm_prompt_path"])
+                keyboard_text = [button["text"] for row in bot.messages[0]["reply_markup"]["inline_keyboard"] for button in row]
+                self.assertIn("NotebookLM проверка", keyboard_text)
+
+                callback = bot.process_update(
+                    {
+                        "callback_query": {
+                            "id": "cb3",
+                            "data": "kb:notebooklm",
+                            "from": {"id": 7},
+                            "message": {"chat": {"id": 123}, "text": result.text},
+                        }
+                    }
+                )
+                self.assertTrue(callback.ok)
+                self.assertEqual(callback.payload["intent"], "notebooklm_check")
+                self.assertIn("фоновую очередь", callback.text)
+
 
 if __name__ == "__main__":
     unittest.main()

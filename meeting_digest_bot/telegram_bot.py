@@ -351,6 +351,8 @@ class TelegramBotFacade:
                 text="Напишите вопрос текстом или отправьте voice и ответьте на него сообщением `@LLMeets_bot ask`.",
                 payload={"intent": "ask_prompt"},
             )
+        elif action == "notebooklm":
+            response = self._process_notebooklm_callback(session_key=session_key)
         elif action.startswith("proposal:"):
             response = self._process_proposal_callback(action, session_key=session_key)
         else:
@@ -520,6 +522,8 @@ class TelegramBotFacade:
             sources=sources,
             answer_mode=answer_mode,
         )
+        if notebook_prompt_path:
+            text = text.strip() + "\n\nNotebookLM: проверка отправлена в фоновую очередь."
         return TelegramResponse(
             ok=True,
             text=text[:3900],
@@ -678,6 +682,10 @@ class TelegramBotFacade:
             session["query"] = str(payload["query"])
         if payload.get("answer_mode"):
             session["answer_mode"] = str(payload["answer_mode"])
+        if payload.get("notebooklm_prompt_path"):
+            session["notebooklm_prompt_path"] = str(payload["notebooklm_prompt_path"])
+        if payload.get("intent") in {"ask", "instruction", "generate_instruction", "spec", "generate_spec", "support"}:
+            session["last_answer"] = response.text
         proposal = payload.get("proposal") or {}
         if proposal.get("metadata_path"):
             self._proposal_refs[key] = [str(proposal["metadata_path"])]
@@ -798,6 +806,30 @@ class TelegramBotFacade:
             )
         return self._run_knowledge_intent("proposals", "")
 
+    def _process_notebooklm_callback(self, *, session_key: str) -> TelegramResponse:
+        session = self._knowledge_sessions.get(session_key) or {}
+        query = str(session.get("query") or "").strip()
+        answer = str(session.get("last_answer") or "").strip()
+        answer_mode = str(session.get("answer_mode") or "general")
+        if not query:
+            return TelegramResponse(
+                ok=False,
+                text="Не вижу последнего вопроса для NotebookLM. Сначала задайте вопрос по базе знаний.",
+                payload={"intent": "notebooklm_check"},
+            )
+        prompt_path = self._queue_notebooklm_followup(query=query, answer=answer, sources=[], answer_mode=answer_mode)
+        if not prompt_path:
+            return TelegramResponse(
+                ok=False,
+                text="NotebookLM очередь не настроена или проект недоступен. Проверьте серверный watcher.",
+                payload={"intent": "notebooklm_check", "query": query},
+            )
+        return TelegramResponse(
+            ok=True,
+            text="NotebookLM проверка отправлена в фоновую очередь. Агент откроет блокнот и задаст уточняющий промт.",
+            payload={"intent": "notebooklm_check", "query": query, "notebooklm_prompt_path": prompt_path},
+        )
+
     @staticmethod
     def _queue_notebooklm_followup(
         *,
@@ -867,6 +899,9 @@ class TelegramBotFacade:
                     {"text": "Экспорт", "callback_data": "kb:export"},
                     {"text": "Правки", "callback_data": "kb:proposals"},
                     {"text": "Статус", "callback_data": "kb:health"},
+                ],
+                [
+                    {"text": "NotebookLM проверка", "callback_data": "kb:notebooklm"},
                 ],
             ]
         }
