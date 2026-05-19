@@ -570,6 +570,11 @@ class TelegramBotFacade:
         if BOT_MENTION_RE.search(text) and any(
             marker in lowered
             for marker in [
+                "ask",
+                "health",
+                "status",
+                "spec",
+                "instruction",
                 "база",
                 "знани",
                 "инструкц",
@@ -585,6 +590,16 @@ class TelegramBotFacade:
             ]
         ):
             return True
+        if BOT_MENTION_RE.search(text):
+            operational_command = (
+                extract_post_link(text)
+                or DAY_COMMAND_RE.search(text)
+                or WEEK_COMMAND_RE.search(text)
+                or REPORT_COMMAND_RE.search(text)
+                or WEEKLY_REPORT_COMMAND_RE.search(text)
+                or cls._is_register_command(text)
+            )
+            return not bool(operational_command)
         return cleaned.startswith(("?", "kb?"))
 
     @classmethod

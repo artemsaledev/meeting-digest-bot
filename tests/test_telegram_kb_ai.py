@@ -269,6 +269,44 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertIn("Показать diff", keyboard_text)
             self.assertIn("Применить", keyboard_text)
 
+    def test_mention_health_routes_to_knowledge_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):
+            KnowledgeRepository(Path(tmp)).init()
+
+            bot = FakeTelegramBot()
+            result = bot.process_update({"message": {"message_id": 24, "text": "@LLMeets_bot health", "chat": {"id": 123}, "from": {"id": 7}}})
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.payload["intent"], "health")
+            self.assertIn("Статус базы знаний", result.text)
+
+    def test_plain_mention_question_routes_to_knowledge_ask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.build_index()
+            repo.build_chunk_index()
+
+            bot = FakeTelegramBot()
+            result = bot.process_update(
+                {
+                    "message": {
+                        "message_id": 25,
+                        "text": "@LLMeets_bot что обсуждали в последней встрече по демо процесса брифа?",
+                        "chat": {"id": 123},
+                        "from": {"id": 7},
+                    }
+                }
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.payload["intent"], "ask")
+            self.assertNotIn("Не удалось распознать ссылку", result.text)
+
 
 if __name__ == "__main__":
     unittest.main()
