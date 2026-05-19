@@ -70,6 +70,73 @@ class NotebookLMAgent:
         self.write_run_log(result, status="prepared")
         return result
 
+    def prepare_knowledge_package(
+        self,
+        *,
+        knowledge_dir: Path | str,
+        session_id: str = "company-knowledge",
+    ) -> NotebookLMPackage:
+        knowledge_root = Path(knowledge_dir)
+        export_root = knowledge_root / "exports" / "notebooklm"
+        manifest_path = export_root / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"NotebookLM knowledge manifest not found: {manifest_path}")
+        manifest = self._load_json(manifest_path)
+        package_root = self.exports_root / session_id
+        source_dir = package_root / "source_bundle"
+        prompt_dir = package_root / "prompt_workspace"
+        machine_dir = package_root / "machine_bundle"
+        if package_root.exists():
+            shutil.rmtree(package_root)
+        source_dir.mkdir(parents=True, exist_ok=True)
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        machine_dir.mkdir(parents=True, exist_ok=True)
+
+        source_files: list[str] = []
+        overview = source_dir / "00_overview.md"
+        overview.write_text(self._knowledge_overview_markdown(manifest=manifest), encoding="utf-8")
+        source_files.append(str(overview.relative_to(package_root)))
+        grouped_sources = self._knowledge_grouped_sources(knowledge_root=knowledge_root, manifest=manifest)
+        for name, text in grouped_sources:
+            dest = source_dir / name
+            dest.write_text(text, encoding="utf-8")
+            source_files.append(str(dest.relative_to(package_root)))
+
+        prompt_path = prompt_dir / "prompt_for_notebooklm.md"
+        prompt_path.write_text(self._knowledge_start_prompt(), encoding="utf-8")
+        handoff = {
+            "session_id": session_id,
+            "status": "exported",
+            "notebooklm_project_title": "Company Knowledge Base",
+            "notebooklm_project_url": "",
+            "source": "company_knowledge",
+            "knowledge_dir": str(knowledge_root),
+            "source_bundle_files": source_files,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        (machine_dir / "handoff_manifest.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return self.prepare_package(session_id=session_id)
+
+    def queue_prompt(
+        self,
+        *,
+        session_id: str,
+        prompt: str,
+        kind: str = "rag_followup",
+    ) -> Path:
+        package_root = self._package_root(session_id)
+        prompt_queue = package_root / "prompt_workspace" / "prompt_queue"
+        prompt_queue.mkdir(parents=True, exist_ok=True)
+        safe_kind = self._safe_file_part(kind or "prompt")
+        prompt_path = prompt_queue / f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}_{safe_kind}.md"
+        prompt_path.write_text(prompt.strip() + "\n", encoding="utf-8")
+        try:
+            prompt_queue.chmod(0o2775)
+            prompt_path.chmod(0o664)
+        except OSError:
+            pass
+        return prompt_path
+
     def open_auth(self, *, url: str = NOTEBOOKLM_URL) -> dict[str, Any]:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         executable = self._browser_executable()
@@ -129,7 +196,12 @@ class NotebookLMAgent:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(NOTEBOOKLM_URL, wait_until="domcontentloaded", timeout=60_000)
                 page.wait_for_timeout(3_000)
-                self._click_button_by_text(page, exact="add\nСоздать", contains="Создать")
+                self._click_button_by_text(
+                    page,
+                    exact="add\nСоздать",
+                    contains="Создать",
+                    fallback_contains="Create",
+                )
                 page.wait_for_url("**/notebook/**", timeout=60_000)
                 page.wait_for_timeout(5_000)
                 notebook_url = page.url.split("?")[0]
@@ -182,6 +254,9 @@ class NotebookLMAgent:
                 processed.extend(self.process_pending(limit=limit, remote=remote, send_prompt=send_prompt))
             except Exception as exc:
                 failures.append({"error": f"{type(exc).__name__}: {exc}"})
+                print(json.dumps({"notebooklm_agent_error": failures[-1]}, ensure_ascii=False), flush=True)
+            if processed:
+                print(json.dumps({"notebooklm_agent_processed": processed[-len(processed) :]}, ensure_ascii=False), flush=True)
             if once:
                 break
             time.sleep(max(5, interval_seconds))
@@ -202,6 +277,13 @@ class NotebookLMAgent:
             results.append(result)
             if remote:
                 self.push_remote_metadata(remote=remote, session_id=session_id)
+        remaining = max(0, limit - len(results))
+        if remaining:
+            for session_id, prompt_path in self.pending_prompt_items(limit=remaining):
+                result = self.send_queued_prompt(session_id=session_id, prompt_path=prompt_path)
+                results.append(result)
+                if remote:
+                    self.push_remote_metadata(remote=remote, session_id=session_id)
         return results
 
     def pending_session_ids(self, *, limit: int = 10) -> list[str]:
@@ -218,6 +300,74 @@ class NotebookLMAgent:
             if len(result) >= limit:
                 break
         return result
+
+    def pending_prompt_items(self, *, limit: int = 10) -> list[tuple[str, Path]]:
+        if not self.exports_root.exists():
+            return []
+        result: list[tuple[str, Path]] = []
+        for manifest_path in sorted(self.exports_root.glob("*/machine_bundle/handoff_manifest.json")):
+            try:
+                manifest = self._load_json(manifest_path)
+            except Exception:
+                continue
+            if not str(manifest.get("notebooklm_project_url") or "").strip():
+                continue
+            session_root = manifest_path.parents[1]
+            for prompt_path in sorted((session_root / "prompt_workspace" / "prompt_queue").glob("*.md")):
+                sent_path = prompt_path.with_suffix(prompt_path.suffix + ".sent")
+                if sent_path.exists():
+                    continue
+                result.append((session_root.name, prompt_path))
+                if len(result) >= limit:
+                    return result
+        return result
+
+    def send_queued_prompt(self, *, session_id: str, prompt_path: Path) -> dict[str, Any]:
+        package = self.prepare_package(session_id=session_id)
+        notebook_url = str(package.manifest.get("notebooklm_project_url") or "").strip()
+        if not notebook_url:
+            raise RuntimeError(f"NotebookLM project URL is not set for session_id={session_id}")
+        prompt = prompt_path.read_text(encoding="utf-8").strip()
+        if not prompt:
+            prompt_path.with_suffix(prompt_path.suffix + ".sent").write_text("empty prompt\n", encoding="utf-8")
+            return {"status": "skipped_empty_prompt", "session_id": session_id, "prompt_path": str(prompt_path)}
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Playwright is required for NotebookLM prompt sending. Run: python -m pip install playwright") from exc
+
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        executable = self._browser_executable()
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                str(self.profile_dir.resolve()),
+                executable_path=str(executable),
+                headless=False,
+                viewport={"width": 1440, "height": 1000},
+                args=["--no-first-run", "--disable-default-apps"],
+            )
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(notebook_url, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(5_000)
+                self._send_prompt(page, prompt)
+                sent_path = prompt_path.with_suffix(prompt_path.suffix + ".sent")
+                sent_path.write_text(datetime.now(UTC).isoformat() + "\n", encoding="utf-8")
+                run_path = self.write_run_log(
+                    package,
+                    status="prompt_sent",
+                    notebooklm_project_url=notebook_url,
+                    notes=[f"Queued prompt sent: {prompt_path.name}"],
+                )
+                return {
+                    "status": "prompt_sent",
+                    "session_id": session_id,
+                    "notebooklm_project_url": notebook_url,
+                    "prompt_path": str(prompt_path),
+                    "run_path": str(run_path),
+                }
+            finally:
+                context.close()
 
     def pull_remote_pending(self, *, remote: RemoteTaskExtractorConfig, limit: int = 5) -> list[str]:
         client = self._connect_remote(remote)
@@ -293,6 +443,105 @@ class NotebookLMAgent:
             return False
         status = str(manifest.get("status") or "").strip()
         return status in {"exported", "ready", "published"} or not status
+
+    @staticmethod
+    def _knowledge_overview_markdown(*, manifest: dict[str, Any]) -> str:
+        objects = manifest.get("objects") or []
+        lines = [
+            "# Company Knowledge Base",
+            "",
+            "This NotebookLM source bundle mirrors the canonical company knowledge base.",
+            "Use it as an external research layer. Do not treat NotebookLM as the source of truth.",
+            "",
+            f"Objects: {len(objects)}",
+            "",
+            "## Operating Rules",
+            "",
+            "- Answer only from uploaded sources.",
+            "- Cite object IDs and source events.",
+            "- When proposing corrections, identify affected systems, features, instructions, and task cases.",
+            "- Return changes as a reviewable proposal, not as an invisible final edit.",
+        ]
+        return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def _knowledge_start_prompt() -> str:
+        return "\n".join(
+            [
+                "You are an external research layer for the company knowledge base.",
+                "Build an internal map of systems, features, instructions, task cases, source events, and contradictions.",
+                "When asked a follow-up prompt, return:",
+                "1. direct answer;",
+                "2. relevant source IDs;",
+                "3. possible gaps or contradictions;",
+                "4. proposed canonical changes, if the prompt asks to correct knowledge.",
+                "Do not invent facts outside uploaded sources.",
+            ]
+        ) + "\n"
+
+    @classmethod
+    def _knowledge_grouped_sources(cls, *, knowledge_root: Path, manifest: dict[str, Any]) -> list[tuple[str, str]]:
+        buckets: dict[str, list[tuple[str, str]]] = {
+            "systems": [],
+            "features": [],
+            "instructions": [],
+            "task_cases": [],
+        }
+        for item in manifest.get("objects") or []:
+            raw_path = Path(str(item.get("path") or ""))
+            source_path = raw_path if raw_path.is_absolute() else knowledge_root / raw_path
+            if not source_path.exists():
+                continue
+            object_id = str(item.get("object_id") or source_path.parent.name or source_path.stem)
+            if object_id.startswith("system__"):
+                bucket = "systems"
+            elif object_id.startswith("feature__"):
+                bucket = "features"
+            elif object_id.startswith("instruction__"):
+                bucket = "instructions"
+            else:
+                bucket = "task_cases"
+            body = source_path.read_text(encoding="utf-8")
+            buckets[bucket].append((object_id, body))
+
+        grouped: list[tuple[str, str]] = []
+        for bucket in ["systems", "features", "instructions"]:
+            entries = buckets[bucket]
+            if not entries:
+                continue
+            grouped.append((f"01_{bucket}.md", cls._knowledge_group_markdown(title=bucket, entries=entries)))
+        task_entries = buckets["task_cases"]
+        chunk_size = 15
+        for offset in range(0, len(task_entries), chunk_size):
+            chunk = task_entries[offset : offset + chunk_size]
+            part = int(offset / chunk_size) + 1
+            grouped.append((f"02_task_cases_part_{part:02d}.md", cls._knowledge_group_markdown(title=f"task_cases_part_{part:02d}", entries=chunk)))
+        return grouped
+
+    @staticmethod
+    def _knowledge_group_markdown(*, title: str, entries: list[tuple[str, str]]) -> str:
+        lines = [
+            f"# {title.replace('_', ' ').title()}",
+            "",
+            "Each section below is one canonical knowledge object. Preserve object IDs when citing or proposing changes.",
+        ]
+        for object_id, body in entries:
+            lines.extend(
+                [
+                    "",
+                    "---",
+                    "",
+                    f"## Object ID: `{object_id}`",
+                    "",
+                    body.strip(),
+                ]
+            )
+        return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def _safe_file_part(value: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip().lower())
+        return cleaned[:120].strip("_") or "source"
 
     @staticmethod
     def _connect_remote(remote: RemoteTaskExtractorConfig) -> Any:
@@ -383,13 +632,7 @@ class NotebookLMAgent:
             if exact and text == exact:
                 button.click(timeout=15_000)
                 return
-            create_notebook_label = "\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0431\u043b\u043e\u043a\u043d\u043e\u0442"
             if contains and contains in text:
-                if create_notebook_label in text:
-                    continue
-                button.click(timeout=15_000)
-                return
-            if contains and contains in text and "Создать блокнот" not in text:
                 button.click(timeout=15_000)
                 return
             if fallback_contains and fallback_contains in text:

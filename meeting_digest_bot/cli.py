@@ -107,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_extractor.add_argument("--task-id", type=int)
 
     notebooklm = subparsers.add_parser("notebooklm-agent")
-    notebooklm.add_argument("action", choices=["open-auth", "prepare", "create", "watch"])
+    notebooklm.add_argument("action", choices=["open-auth", "prepare", "create", "watch", "prepare-knowledge", "queue-prompt"])
     notebooklm.add_argument("--session-id")
     notebooklm.add_argument("--exports-root", default="exports/task_extractor")
     notebooklm.add_argument("--profile-dir", default="data/notebooklm-browser-profile")
@@ -123,6 +123,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--remote-exports-root",
         default=os.environ.get("TASK_EXTRACTOR_REMOTE_EXPORTS_ROOT", "/opt/meeting-digest-bot/exports/task_extractor"),
     )
+    notebooklm.add_argument("--knowledge-dir", default=os.environ.get("KNOWLEDGE_REPO_PATH", "/opt/company-knowledge"))
+    notebooklm.add_argument("--prompt", default="")
+    notebooklm.add_argument("--prompt-file")
+    notebooklm.add_argument("--kind", default="manual")
 
     export_knowledge = subparsers.add_parser("export-knowledge")
     export_knowledge.add_argument("--post-url")
@@ -308,6 +312,35 @@ def main(argv: list[str] | None = None) -> int:
                 send_prompt=not args.no_prompt,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.action == "prepare-knowledge":
+            session_id = args.session_id or "company-knowledge"
+            package = agent.prepare_knowledge_package(knowledge_dir=Path(args.knowledge_dir), session_id=session_id)
+            print(
+                json.dumps(
+                    {
+                        "status": "prepared",
+                        "session_id": package.session_id,
+                        "title": package.title,
+                        "root": str(package.root),
+                        "manifest_path": str(package.manifest_path),
+                        "source_files": [str(path) for path in package.source_files],
+                        "prompt_path": str(package.prompt_path),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+        if args.action == "queue-prompt":
+            session_id = args.session_id or "company-knowledge"
+            prompt = args.prompt
+            if args.prompt_file:
+                prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+            if not prompt.strip():
+                raise RuntimeError("--prompt or --prompt-file is required for notebooklm-agent queue-prompt")
+            prompt_path = agent.queue_prompt(session_id=session_id, prompt=prompt, kind=args.kind)
+            print(json.dumps({"status": "queued", "session_id": session_id, "prompt_path": str(prompt_path)}, ensure_ascii=False, indent=2))
             return 0
         if not args.session_id:
             raise RuntimeError("--session-id is required for notebooklm-agent prepare/create")
@@ -835,6 +868,18 @@ def main(argv: list[str] | None = None) -> int:
                         service.state.update_kb_candidate_status(post_url=post_url, status="indexed")
                 if args.export_target != "none":
                     summary["external_export"] = repo.export_external_bundle(target=args.export_target).model_dump()
+                    notebooklm_exports_root = os.environ.get("KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT")
+                    if args.export_target == "notebooklm" and notebooklm_exports_root:
+                        package = NotebookLMAgent(exports_root=Path(notebooklm_exports_root)).prepare_knowledge_package(
+                            knowledge_dir=repo.root,
+                            session_id=os.environ.get("KNOWLEDGE_NOTEBOOKLM_SESSION_ID") or "company-knowledge",
+                        )
+                        summary["notebooklm_agent_package"] = {
+                            "session_id": package.session_id,
+                            "root": str(package.root),
+                            "source_count": len(package.source_files),
+                            "prompt_path": str(package.prompt_path),
+                        }
                 if args.sync_notion:
                     import os
 

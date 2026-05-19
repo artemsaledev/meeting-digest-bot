@@ -13,6 +13,7 @@ import requests
 from .knowledge_alerts import read_knowledge_alert_chat_id, write_knowledge_alert_chat_id
 from .knowledge_rag import KnowledgeVectorStore, client_from_env
 from .knowledge_repo import KnowledgeRepository
+from .notebooklm_agent import NotebookLMAgent
 from .models import (
     DailyPlanSyncRequest,
     DailyReportRequest,
@@ -513,10 +514,22 @@ class TelegramBotFacade:
         text = str(result.get("answer") or "")
         if source_lines:
             text = text.strip() + "\n\nИсточники:\n" + "\n".join(source_lines)
+        notebook_prompt_path = self._queue_notebooklm_followup(
+            query=query,
+            answer=text,
+            sources=sources,
+            answer_mode=answer_mode,
+        )
         return TelegramResponse(
             ok=True,
             text=text[:3900],
-            payload={"intent": intent, "query": query, "answer_mode": answer_mode, "sources_count": len(sources)},
+            payload={
+                "intent": intent,
+                "query": query,
+                "answer_mode": answer_mode,
+                "sources_count": len(sources),
+                "notebooklm_prompt_path": notebook_prompt_path,
+            },
         )
 
     def _answer_from_knowledge(self, repo: KnowledgeRepository, query: str, *, answer_mode: str) -> dict:
@@ -784,6 +797,55 @@ class TelegramBotFacade:
                 },
             )
         return self._run_knowledge_intent("proposals", "")
+
+    @staticmethod
+    def _queue_notebooklm_followup(
+        *,
+        query: str,
+        answer: str,
+        sources: list[dict],
+        answer_mode: str,
+    ) -> str:
+        exports_root = os.environ.get("KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT")
+        if not exports_root:
+            return ""
+        session_id = os.environ.get("KNOWLEDGE_NOTEBOOKLM_SESSION_ID") or "company-knowledge"
+        source_lines = [
+            f"- {item.get('object_id')} / {item.get('chunk_id') or item.get('score')}"
+            for item in sources[:8]
+        ]
+        prompt = "\n".join(
+            [
+                "Проверь и дополни ответ по базе знаний как внешний исследовательский слой NotebookLM.",
+                "",
+                f"Режим ответа: {answer_mode}",
+                "",
+                "Вопрос пользователя:",
+                query,
+                "",
+                "Ответ RAG:",
+                answer,
+                "",
+                "Источники RAG:",
+                "\n".join(source_lines) if source_lines else "- нет источников",
+                "",
+                "Верни:",
+                "1. что подтверждается источниками;",
+                "2. какие детали стоит добавить;",
+                "3. есть ли противоречия;",
+                "4. какие canonical objects нужно обновить, если вопрос содержит корректировку.",
+            ]
+        )
+        try:
+            path = NotebookLMAgent(exports_root=Path(exports_root)).queue_prompt(
+                session_id=session_id,
+                prompt=prompt,
+                kind="rag_followup",
+            )
+            return str(path)
+        except Exception as exc:
+            print(f"NotebookLM prompt queue failed: {exc}")
+            return ""
 
     @staticmethod
     def _knowledge_menu_text() -> str:

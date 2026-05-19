@@ -58,6 +58,40 @@ class NotebookLMAgentTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 agent.prepare_package(session_id="session1")
 
+    def test_prepare_knowledge_package_and_queue_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            knowledge = Path(tmp) / "company-knowledge"
+            export = knowledge / "exports" / "notebooklm"
+            source = export / "object1" / "source.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# Object 1\n", encoding="utf-8")
+            (export / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "objects": [
+                            {
+                                "object_id": "object__one",
+                                "title": "Object One",
+                                "path": str(source),
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            agent = NotebookLMAgent(exports_root=Path(tmp) / "exports" / "knowledge_notebooklm")
+            package = agent.prepare_knowledge_package(knowledge_dir=knowledge, session_id="company-knowledge")
+            self.assertEqual(package.session_id, "company-knowledge")
+            self.assertEqual(package.title, "Company Knowledge Base")
+            self.assertGreaterEqual(len(package.source_files), 2)
+            manifest = json.loads(package.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source"], "company_knowledge")
+
+            prompt_path = agent.queue_prompt(session_id="company-knowledge", prompt="Проверь Payments Pro", kind="rag_followup")
+            self.assertTrue(prompt_path.exists())
+            self.assertIn("Проверь Payments Pro", prompt_path.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
