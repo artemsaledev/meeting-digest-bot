@@ -101,6 +101,61 @@ class NotebookLMAgentTests(unittest.TestCase):
             self.assertEqual(manifest_again["status"], "notebook_created")
             self.assertTrue(prompt_path.exists())
 
+    def test_queue_prompt_writes_delivery_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "exports" / "task_extractor" / "session1"
+            (root / "source_bundle").mkdir(parents=True)
+            (root / "prompt_workspace").mkdir()
+            (root / "machine_bundle").mkdir()
+            (root / "source_bundle" / "00_readme.md").write_text("# Readme\n", encoding="utf-8")
+            (root / "prompt_workspace" / "prompt_for_notebooklm.md").write_text("Prompt\n", encoding="utf-8")
+            (root / "machine_bundle" / "handoff_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "session1",
+                        "notebooklm_project_title": "Task 123 - Test",
+                        "source_bundle_files": ["source_bundle/00_readme.md"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            agent = NotebookLMAgent(exports_root=Path(tmp) / "exports" / "task_extractor")
+            prompt_path = agent.queue_prompt(
+                session_id="session1",
+                prompt="Check answer",
+                metadata={
+                    "query": "How does Payments Pro work?",
+                    "rag_answer": "RAG answer",
+                    "telegram_chat_id": -100123,
+                    "telegram_reply_to_message_id": 55,
+                },
+            )
+            metadata = json.loads(prompt_path.with_suffix(prompt_path.suffix + ".json").read_text(encoding="utf-8"))
+
+            self.assertEqual(metadata["query"], "How does Payments Pro work?")
+            self.assertEqual(metadata["telegram_chat_id"], -100123)
+            self.assertEqual(metadata["session_id"], "session1")
+
+    def test_extract_answer_delta_removes_loading_noise(self) -> None:
+        before = "Sources\nChat\n"
+        after = before + "User question\nGetting the gist...\nNotebook answer line 1\n\nNotebook answer line 2\n"
+        answer = NotebookLMAgent._extract_answer_delta(before_text=before, after_text=after, prompt="User question")
+
+        self.assertIn("Notebook answer line 1", answer)
+        self.assertNotIn("Getting the gist", answer)
+
+    def test_synthesis_fallback_combines_rag_and_notebooklm(self) -> None:
+        text = NotebookLMAgent._synthesize_rag_and_notebooklm(
+            query="Как работает общий платеж?",
+            rag_answer="RAG details",
+            notebooklm_answer="NotebookLM details",
+        )
+
+        self.assertIn("Синтез RAG + NotebookLM", text)
+        self.assertIn("NotebookLM details", text)
+        self.assertIn("RAG details", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
+import requests
 import shutil
 import subprocess
 import time
@@ -131,6 +133,7 @@ class NotebookLMAgent:
         session_id: str,
         prompt: str,
         kind: str = "rag_followup",
+        metadata: dict[str, Any] | None = None,
     ) -> Path:
         package_root = self._package_root(session_id)
         prompt_queue = package_root / "prompt_workspace" / "prompt_queue"
@@ -138,9 +141,21 @@ class NotebookLMAgent:
         safe_kind = self._safe_file_part(kind or "prompt")
         prompt_path = prompt_queue / f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}_{safe_kind}.md"
         prompt_path.write_text(prompt.strip() + "\n", encoding="utf-8")
+        if metadata:
+            metadata_path = prompt_path.with_suffix(prompt_path.suffix + ".json")
+            payload = {
+                **metadata,
+                "session_id": session_id,
+                "kind": kind,
+                "prompt_path": str(prompt_path),
+                "queued_at": datetime.now(UTC).isoformat(),
+            }
+            metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         try:
             prompt_queue.chmod(0o2775)
             prompt_path.chmod(0o664)
+            if metadata:
+                metadata_path.chmod(0o664)
         except OSError:
             pass
         return prompt_path
@@ -363,20 +378,32 @@ class NotebookLMAgent:
                 page.goto(notebook_url, wait_until="domcontentloaded", timeout=60_000)
                 page.wait_for_timeout(5_000)
                 self._wait_for_manual_auth_if_needed(page)
+                before_text = self._page_text(page)
                 self._send_prompt(page, prompt)
+                notebooklm_answer = self._wait_for_answer_text(page, before_text=before_text, prompt=prompt)
+                response_paths = self._write_prompt_response(
+                    prompt_path=prompt_path,
+                    notebooklm_answer=notebooklm_answer,
+                )
+                delivery = self._deliver_prompt_response(
+                    prompt_path=prompt_path,
+                    notebooklm_answer=notebooklm_answer,
+                )
                 sent_path = prompt_path.with_suffix(prompt_path.suffix + ".sent")
                 sent_path.write_text(datetime.now(UTC).isoformat() + "\n", encoding="utf-8")
                 run_path = self.write_run_log(
                     package,
                     status="prompt_sent",
                     notebooklm_project_url=notebook_url,
-                    notes=[f"Queued prompt sent: {prompt_path.name}"],
+                    notes=[f"Queued prompt sent: {prompt_path.name}", f"Response captured: {response_paths['json']}"],
                 )
                 return {
                     "status": "prompt_sent",
                     "session_id": session_id,
                     "notebooklm_project_url": notebook_url,
                     "prompt_path": str(prompt_path),
+                    "notebooklm_answer_path": response_paths["markdown"],
+                    "telegram_delivery": delivery,
                     "run_path": str(run_path),
                 }
             finally:
@@ -627,6 +654,183 @@ class NotebookLMAgent:
         textarea.fill(prompt)
         textarea.press("Enter")
         page.wait_for_timeout(20_000)
+
+    @staticmethod
+    def _page_text(page: Any) -> str:
+        try:
+            return str(page.locator("body").inner_text(timeout=10_000) or "")
+        except Exception:
+            return ""
+
+    @classmethod
+    def _wait_for_answer_text(cls, page: Any, *, before_text: str, prompt: str) -> str:
+        last_text = ""
+        for _ in range(18):
+            page.wait_for_timeout(5_000)
+            body_text = cls._page_text(page)
+            answer = cls._extract_answer_delta(before_text=before_text, after_text=body_text, prompt=prompt)
+            if answer and answer == last_text:
+                return answer
+            if answer:
+                last_text = answer
+            folded = body_text.casefold()
+            if answer and not any(marker in folded for marker in ["getting the gist", "генерация ответа", "generating"]):
+                return answer
+        if last_text:
+            return last_text
+        return cls._extract_answer_delta(before_text=before_text, after_text=cls._page_text(page), prompt=prompt)
+
+    @classmethod
+    def _extract_answer_delta(cls, *, before_text: str, after_text: str, prompt: str) -> str:
+        if not after_text:
+            return ""
+        delta = after_text
+        if before_text and after_text.startswith(before_text):
+            delta = after_text[len(before_text) :]
+        else:
+            first_prompt_line = next((line.strip() for line in prompt.splitlines() if line.strip()), "")
+            if first_prompt_line:
+                marker_index = after_text.rfind(first_prompt_line[: min(120, len(first_prompt_line))])
+                if marker_index >= 0:
+                    delta = after_text[marker_index + len(first_prompt_line) :]
+        return cls._clean_notebooklm_answer(delta)
+
+    @staticmethod
+    def _clean_notebooklm_answer(text: str) -> str:
+        lines = [line.strip() for line in str(text or "").splitlines()]
+        cleaned: list[str] = []
+        skip_markers = {
+            "getting the gist",
+            "генерация ответа",
+            "ответы notebooklm могут быть неточны",
+            "notebooklm responses may be inaccurate",
+        }
+        for line in lines:
+            if not line:
+                if cleaned and cleaned[-1]:
+                    cleaned.append("")
+                continue
+            folded = line.casefold()
+            if any(marker in folded for marker in skip_markers):
+                continue
+            cleaned.append(line)
+        answer = "\n".join(cleaned).strip()
+        answer = re.sub(r"\n{3,}", "\n\n", answer)
+        return answer[:12000]
+
+    def _write_prompt_response(self, *, prompt_path: Path, notebooklm_answer: str) -> dict[str, str]:
+        response_dir = prompt_path.parent / "responses"
+        response_dir.mkdir(parents=True, exist_ok=True)
+        stem = prompt_path.stem
+        metadata = self._prompt_metadata(prompt_path)
+        markdown_path = response_dir / f"{stem}.response.md"
+        json_path = response_dir / f"{stem}.response.json"
+        markdown_path.write_text(notebooklm_answer.strip() + "\n", encoding="utf-8")
+        json_path.write_text(
+            json.dumps(
+                {
+                    "prompt_path": str(prompt_path),
+                    "metadata_path": str(prompt_path.with_suffix(prompt_path.suffix + ".json")),
+                    "query": metadata.get("query"),
+                    "answer_mode": metadata.get("answer_mode"),
+                    "notebooklm_answer": notebooklm_answer,
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {"markdown": str(markdown_path), "json": str(json_path)}
+
+    def _deliver_prompt_response(self, *, prompt_path: Path, notebooklm_answer: str) -> dict[str, Any]:
+        metadata = self._prompt_metadata(prompt_path)
+        chat_id = metadata.get("telegram_chat_id")
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not chat_id or not token:
+            return {"sent": False, "reason": "telegram_context_or_token_missing"}
+        text = self._synthesize_rag_and_notebooklm(
+            query=str(metadata.get("query") or ""),
+            rag_answer=str(metadata.get("rag_answer") or ""),
+            notebooklm_answer=notebooklm_answer,
+            answer_mode=str(metadata.get("answer_mode") or "general"),
+        )
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text[:4000],
+            "disable_web_page_preview": True,
+        }
+        reply_to = metadata.get("telegram_reply_to_message_id")
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
+            payload["allow_sending_without_reply"] = True
+        response = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=30)
+        if response.status_code >= 400:
+            return {"sent": False, "status_code": response.status_code, "error": response.text[:1000]}
+        return {"sent": True, "status_code": response.status_code}
+
+    def _prompt_metadata(self, prompt_path: Path) -> dict[str, Any]:
+        metadata_path = prompt_path.with_suffix(prompt_path.suffix + ".json")
+        if not metadata_path.exists():
+            return {}
+        try:
+            parsed = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _synthesize_rag_and_notebooklm(
+        *,
+        query: str,
+        rag_answer: str,
+        notebooklm_answer: str,
+        answer_mode: str = "general",
+    ) -> str:
+        try:
+            from .knowledge_rag import client_from_env
+
+            client = client_from_env(dict(os.environ), require_llm=True)
+        except Exception:
+            client = None
+        if client:
+            try:
+                return client.answer(
+                    query=(
+                        "Собери финальный ответ для Telegram, объединив первичный RAG-ответ и проверку NotebookLM. "
+                        "Убери противоречия, явно отметь, что подтверждено, что дополнено NotebookLM, и что требует проверки.\n\n"
+                        f"Исходный вопрос:\n{query}"
+                    ),
+                    contexts=[
+                        {
+                            "title": "Primary RAG answer",
+                            "object_id": "rag_answer",
+                            "chunk_id": "rag",
+                            "content": rag_answer,
+                        },
+                        {
+                            "title": "NotebookLM verification",
+                            "object_id": "notebooklm_answer",
+                            "chunk_id": "notebooklm",
+                            "content": notebooklm_answer,
+                        },
+                    ],
+                    answer_mode=answer_mode,
+                )
+            except Exception:
+                pass
+        parts = [
+            "Синтез RAG + NotebookLM",
+            "",
+            f"Вопрос: {query or '-'}",
+            "",
+            "Итог:",
+            (notebooklm_answer or rag_answer or "NotebookLM не вернул содержательный ответ.").strip(),
+        ]
+        if rag_answer:
+            parts.extend(["", "Первичный RAG-ответ:", rag_answer.strip()[:1400]])
+        return "\n".join(parts).strip()
 
     @staticmethod
     def _wait_for_manual_auth_if_needed(page: Any) -> None:

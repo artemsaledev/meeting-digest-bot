@@ -352,7 +352,11 @@ class TelegramBotFacade:
                 payload={"intent": "ask_prompt"},
             )
         elif action == "notebooklm":
-            response = self._process_notebooklm_callback(session_key=session_key)
+            response = self._process_notebooklm_callback(
+                session_key=session_key,
+                chat_id=chat_id,
+                reply_to_message_id=(message.get("reply_to_message") or {}).get("message_id") or message.get("message_id"),
+            )
         elif action.startswith("proposal:"):
             response = self._process_proposal_callback(action, session_key=session_key)
         else:
@@ -459,9 +463,22 @@ class TelegramBotFacade:
         intent = self._classify_knowledge_intent(query)
         if intent == "menu":
             return TelegramResponse(ok=True, text=self._knowledge_menu_text(), payload={"intent": "menu"})
-        return self._run_knowledge_intent(intent, query)
+        chat = message.get("chat") or {}
+        return self._run_knowledge_intent(
+            intent,
+            query,
+            telegram_chat_id=chat.get("id"),
+            telegram_reply_to_message_id=message.get("message_id"),
+        )
 
-    def _run_knowledge_intent(self, intent: str, query: str) -> TelegramResponse:
+    def _run_knowledge_intent(
+        self,
+        intent: str,
+        query: str,
+        *,
+        telegram_chat_id: int | str | None = None,
+        telegram_reply_to_message_id: int | str | None = None,
+    ) -> TelegramResponse:
         repo = KnowledgeRepository(Path(os.environ.get("KNOWLEDGE_REPO_PATH", "company-knowledge")))
         if intent in {"health", "status"}:
             pending = len(repo.list_revision_metadata(status="draft"))
@@ -521,6 +538,8 @@ class TelegramBotFacade:
             answer=text,
             sources=sources,
             answer_mode=answer_mode,
+            telegram_chat_id=telegram_chat_id,
+            telegram_reply_to_message_id=telegram_reply_to_message_id,
         )
         if notebook_prompt_path:
             text = text.strip() + "\n\nNotebookLM: проверка отправлена в фоновую очередь."
@@ -881,7 +900,13 @@ class TelegramBotFacade:
             )
         return self._run_knowledge_intent("proposals", "")
 
-    def _process_notebooklm_callback(self, *, session_key: str) -> TelegramResponse:
+    def _process_notebooklm_callback(
+        self,
+        *,
+        session_key: str,
+        chat_id: int | str | None = None,
+        reply_to_message_id: int | str | None = None,
+    ) -> TelegramResponse:
         session = self._knowledge_sessions.get(session_key) or {}
         query = str(session.get("query") or "").strip()
         answer = str(session.get("last_answer") or "").strip()
@@ -892,7 +917,14 @@ class TelegramBotFacade:
                 text="Не вижу последнего вопроса для NotebookLM. Сначала задайте вопрос по базе знаний.",
                 payload={"intent": "notebooklm_check"},
             )
-        prompt_path = self._queue_notebooklm_followup(query=query, answer=answer, sources=[], answer_mode=answer_mode)
+        prompt_path = self._queue_notebooklm_followup(
+            query=query,
+            answer=answer,
+            sources=[],
+            answer_mode=answer_mode,
+            telegram_chat_id=chat_id,
+            telegram_reply_to_message_id=reply_to_message_id,
+        )
         if not prompt_path:
             return TelegramResponse(
                 ok=False,
@@ -912,6 +944,8 @@ class TelegramBotFacade:
         answer: str,
         sources: list[dict],
         answer_mode: str,
+        telegram_chat_id: int | str | None = None,
+        telegram_reply_to_message_id: int | str | None = None,
     ) -> str:
         exports_root = os.environ.get("KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT")
         if not exports_root:
@@ -948,6 +982,15 @@ class TelegramBotFacade:
                 session_id=session_id,
                 prompt=prompt,
                 kind="rag_followup",
+                metadata={
+                    "query": query,
+                    "rag_answer": answer,
+                    "answer_mode": answer_mode,
+                    "sources": sources[:8],
+                    "telegram_chat_id": telegram_chat_id,
+                    "telegram_reply_to_message_id": telegram_reply_to_message_id,
+                    "delivery": "telegram_synthesis" if telegram_chat_id else "store_only",
+                },
             )
             return str(path)
         except Exception as exc:
