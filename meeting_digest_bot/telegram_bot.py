@@ -250,6 +250,13 @@ class TelegramBotFacade:
     def _process_task_extractor_request(self, text: str, *, message: dict) -> TelegramResponse | None:
         action = self._task_extractor_action(text)
         mentioned = TASK_EXTRACTOR_MENTION_RE.search(text) is not None
+        llmeets_task_context = (
+            BOT_MENTION_RE.search(text) is not None
+            and action is not None
+            and self._is_task_extractor_context(text, message=message)
+        )
+        if llmeets_task_context:
+            mentioned = True
         if not mentioned and not self.task_extractor_mode:
             return None
         if not action and self.task_extractor_mode:
@@ -1249,7 +1256,9 @@ class TelegramBotFacade:
 
     @staticmethod
     def _task_extractor_action(text: str) -> TaskExtractorAction | None:
-        cleaned = f" {TASK_EXTRACTOR_MENTION_RE.sub(' ', text or '').strip().lower()} "
+        cleaned = TASK_EXTRACTOR_MENTION_RE.sub(" ", text or "")
+        cleaned = BOT_MENTION_RE.sub(" ", cleaned)
+        cleaned = f" {cleaned.strip().lower()} "
         mapping = [
             (TaskExtractorAction.collect, [" collect ", " /collect ", " собрать ", " /собрать "]),
             (TaskExtractorAction.add, [" add ", " /add ", " добавить ", " /добавить "]),
@@ -1266,6 +1275,20 @@ class TelegramBotFacade:
             if any(marker in cleaned for marker in markers):
                 return action
         return None
+
+    @classmethod
+    def _is_task_extractor_context(cls, text: str, *, message: dict) -> bool:
+        if extract_post_link(text) or extract_task_id(text) or cls._looks_like_task_extractor_source(text):
+            return True
+        reply = message.get("reply_to_message") or {}
+        reply_text = cls._normalize_text(reply.get("text") or reply.get("caption") or "")
+        if not reply_text:
+            return False
+        return bool(
+            extract_post_link(reply_text)
+            or cls._looks_like_task_extractor_source(reply_text)
+            or re.search(r"\b(?:loom|встреча|meeting|#daily|#task_discussion|#task_demo)\b", reply_text, re.IGNORECASE)
+        )
 
     @staticmethod
     def _looks_like_task_extractor_source(text: str) -> bool:
