@@ -144,6 +144,30 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertTrue(bot.documents)
             self.assertTrue(bot.documents[0]["path"].endswith(".zip"))
 
+    def test_kb_export_command_sends_zip_without_action_keyboard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.derive_catalogs()
+
+            bot = FakeTelegramBot()
+            result = bot.process_update(
+                {
+                    "message": {
+                        "message_id": 111,
+                        "text": "@LLMeets_bot kb export notebooklm",
+                        "chat": {"id": 123},
+                        "from": {"id": 7},
+                    }
+                }
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.payload["intent"], "export_bundle")
+            self.assertTrue(bot.documents)
+            self.assertTrue(bot.documents[0]["path"].endswith(".zip"))
+            self.assertFalse(bot.messages)
+
     def test_mention_only_reply_to_voice_uses_transcription(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
@@ -234,10 +258,9 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertIn("Правки на проверке", result.text)
             keyboard_text = [button["text"] for row in bot.messages[0]["reply_markup"]["inline_keyboard"] for button in row]
-            self.assertIn("1 Показать", keyboard_text)
-            self.assertIn("1 Принять", keyboard_text)
-            self.assertIn("1 Применить", keyboard_text)
-            self.assertIn("1 Отклонить", keyboard_text)
+            self.assertIn("Показать эффект", keyboard_text)
+            self.assertIn("Применить", keyboard_text)
+            self.assertIn("Отклонить", keyboard_text)
 
     def test_revision_creation_returns_buttons_not_manual_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
@@ -263,11 +286,69 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             )
 
             self.assertTrue(result.ok)
-            self.assertIn("черновик правки", result.text)
+            self.assertIn("правки на проверку", result.text)
             self.assertNotIn("kb approve", result.text)
             keyboard_text = [button["text"] for row in bot.messages[0]["reply_markup"]["inline_keyboard"] for button in row]
-            self.assertIn("Показать diff", keyboard_text)
+            self.assertIn("Показать эффект", keyboard_text)
             self.assertIn("Применить", keyboard_text)
+
+    def test_revision_term_correction_targets_related_objects_and_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            item = knowledge_object().model_copy(
+                update={
+                    "current_summary": "Сборочный документ может быть в системе ВМС или ИГРА.",
+                    "current_requirements": ["Поддержать сборочный документ для ВМС и ИГРА."],
+                    "feature_area": "assembly",
+                }
+            )
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([item])
+            repo.derive_catalogs()
+            repo.build_index()
+            repo.build_chunk_index()
+
+            bot = FakeTelegramBot()
+            result = bot.process_update(
+                {
+                    "message": {
+                        "message_id": 231,
+                        "text": '@LLMeets_bot исправь знание: сборочный документ, может быть в системе 1С, WMS (замени аббревиатуру вместо "ВМС"), CRM (замени аббревиатуру вместо "ИГРА")',
+                        "chat": {"id": 123},
+                        "from": {"id": 7},
+                    }
+                }
+            )
+
+            self.assertTrue(result.ok)
+            self.assertGreater(len(result.payload["proposals"]), 1)
+            self.assertIn("Эффект правки", result.text)
+            self.assertIn("`ВМС` будет заменено на `WMS`", result.text)
+            self.assertIn("`ИГРА` будет заменено на `CRM`", result.text)
+            keyboard_text = [button["text"] for row in bot.messages[0]["reply_markup"]["inline_keyboard"] for button in row]
+            self.assertIn("Применить все", keyboard_text)
+            self.assertIn("Отклонить все", keyboard_text)
+            self.assertNotIn("1 Показать эффект", keyboard_text)
+            self.assertNotIn("1 Применить", keyboard_text)
+
+            applied = bot.process_update(
+                {
+                    "callback_query": {
+                        "id": "cb-apply-all",
+                        "data": "kb:proposal:apply_all:0",
+                        "from": {"id": 7},
+                        "message": {"chat": {"id": 123}, "text": result.text},
+                    }
+                }
+            )
+            self.assertTrue(applied.ok)
+            self.assertIn("Применил правки", applied.text)
+            updated = (Path(tmp) / "knowledge" / "task_cases" / f"{item.object_id}.json").read_text(encoding="utf-8")
+            self.assertIn("WMS", updated)
+            self.assertIn("CRM", updated)
 
     def test_mention_health_routes_to_knowledge_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):

@@ -153,8 +153,13 @@ class TelegramBotFacade:
         kb_response = self._process_kb_command(text) if self._chat_allowed("KNOWLEDGE_ALLOWED_CHAT_IDS", chat_id) else None
         if kb_response:
             if chat_id:
-                self._remember_knowledge_context(chat_id, (message.get("from") or {}).get("id"), kb_response)
-                self.send_message(chat_id, kb_response.text, reply_markup=self._keyboard_for_response(kb_response, chat_id=chat_id, user_id=(message.get("from") or {}).get("id")))
+                user_id = (message.get("from") or {}).get("id")
+                self._remember_knowledge_context(chat_id, user_id, kb_response)
+                attachment = kb_response.payload.get("attachment_path")
+                if attachment:
+                    self.send_document(chat_id, str(attachment), caption=kb_response.text[:1000])
+                else:
+                    self.send_message(chat_id, kb_response.text, reply_markup=self._keyboard_for_response(kb_response, chat_id=chat_id, user_id=user_id))
             return kb_response
 
         kb_ai_response = self._process_knowledge_ai_request(text, message=message) if self._chat_allowed("KNOWLEDGE_ALLOWED_CHAT_IDS", chat_id) else None
@@ -411,7 +416,7 @@ class TelegramBotFacade:
                 metadata_path = repo.resolve_revision_metadata(token)
                 if not metadata_path:
                     return TelegramResponse(ok=False, text=f"KB proposal not found: {token}")
-                return TelegramResponse(ok=True, text=f"KB diff for {token}:\n{repo.revision_diff_text(metadata_path=metadata_path)}")
+                return TelegramResponse(ok=True, text=self._revision_impact_preview(repo, metadata_path=metadata_path))
             if action in {"approve", "reject"} and token:
                 metadata_path = repo.resolve_revision_metadata(token)
                 if not metadata_path:
@@ -607,27 +612,212 @@ class TelegramBotFacade:
 
     def _create_knowledge_revision_from_query(self, repo: KnowledgeRepository, query: str) -> TelegramResponse:
         result = self._answer_from_knowledge(repo, query, answer_mode="general")
-        task_case_id = ""
+        replacements = self._extract_term_replacements(query)
+        source_ids: list[str] = []
         for item in result.get("sources") or []:
             object_id = str(item.get("object_id") or "")
-            if object_id.startswith("task_case__"):
-                task_case_id = object_id
-                break
-        if not task_case_id:
+            if object_id and object_id not in source_ids:
+                source_ids.append(object_id)
+        object_ids = self._affected_revision_object_ids(repo, query=query, source_ids=source_ids, replacements=replacements)
+        if not object_ids:
             return TelegramResponse(
                 ok=False,
-                text="Не нашел подходящий task_case для правки. Уточните систему, функциональность или object_id.",
+                text="Не нашел подходящие объекты базы знаний для правки. Уточните систему, функциональность или object_id.",
                 payload={"intent": "revise_knowledge"},
             )
-        proposal = repo.create_revision_proposal(object_id=task_case_id, correction=query)
-        text = "\n".join(
+        proposals = [
+            repo.create_revision_proposal(
+                object_id=object_id,
+                correction=query,
+                replacements=[{"old": old, "new": new} for old, new in replacements],
+            ).model_dump()
+            for object_id in object_ids
+        ]
+        lines = [f"Создал правки на проверку: {len(proposals)}."]
+        if replacements:
+            lines.extend(["", "Что реально изменится в ответах и инструкциях:"])
+            lines.extend(f"- `{old}` будет трактоваться и записываться как `{new}`." for old, new in replacements)
+        else:
+            lines.extend(["", "Что реально изменится:"])
+            lines.append("- База зафиксирует вашу корректировку как правило для связанных объектов и последующего применения.")
+        lines.extend(["", "Связанные объекты:"])
+        for object_id in object_ids[:8]:
+            lines.append(f"- {self._knowledge_object_label(repo, object_id)}")
+        if len(proposals) > 1:
+            lines.extend(["", "Нажмите `Применить все`, если сводка верная, или `Отклонить все`, если правку нужно переформулировать."])
+        else:
+            lines.extend(["", "Нажмите кнопку ниже: можно посмотреть эффект, применить или отклонить."])
+        return TelegramResponse(
+            ok=True,
+            text=self._revision_batch_impact_preview(repo, proposals=proposals) if len(proposals) > 1 else "\n".join(lines)[:3900],
+            payload={
+                "intent": "revise_knowledge",
+                "query": query,
+                "proposal": proposals[0] if len(proposals) == 1 else {},
+                "proposals": proposals,
+                "replacements": [{"old": old, "new": new} for old, new in replacements],
+            },
+        )
+
+    @staticmethod
+    def _extract_term_replacements(query: str) -> list[tuple[str, str]]:
+        replacements: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(old: str, new: str) -> None:
+            old = old.strip(" `\"'«»")
+            new = new.strip(" `\"'«».,;:")
+            if not old or not new or old.casefold() == new.casefold():
+                return
+            key = (old.casefold(), new.casefold())
+            if key not in seen:
+                seen.add(key)
+                replacements.append((old, new))
+
+        for match in re.finditer(r"(?P<new>[A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9_.-]+)\s*\([^)]*вместо\s+[\"«](?P<old>[^\"»]+)[\"»][^)]*\)", query, flags=re.IGNORECASE):
+            add(match.group("old"), match.group("new"))
+        for match in re.finditer(r"[\"«](?P<old>[^\"»]+)[\"»]\s*(?:->|=>|на)\s*[\"«]?(?P<new>[A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9_.-]+)[\"»]?", query, flags=re.IGNORECASE):
+            add(match.group("old"), match.group("new"))
+        for match in re.finditer(r"замени(?:ть)?\s+[\"«]?(?P<old>[^\"»]+?)[\"»]?\s+на\s+[\"«]?(?P<new>[A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9_.-]+)[\"»]?(?:[\s,.;)]|$)", query, flags=re.IGNORECASE):
+            add(match.group("old"), match.group("new"))
+        return replacements
+
+    def _affected_revision_object_ids(
+        self,
+        repo: KnowledgeRepository,
+        *,
+        query: str,
+        source_ids: list[str],
+        replacements: list[tuple[str, str]],
+    ) -> list[str]:
+        limit = int(os.environ.get("KNOWLEDGE_REVISION_BATCH_LIMIT", "8"))
+        scores: dict[str, int] = {}
+        old_terms = [old for old, _new in replacements]
+        query_terms = [term.casefold() for term in re.findall(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ0-9]{3,}", query)]
+        for path in repo._knowledge_json_paths():  # Repository-local review helper; keeps Telegram UX source-grounded.
+            data = repo._read_json(path)
+            object_id = str(data.get("object_id") or path.stem)
+            text = repo._index_text(data)
+            folded = text.casefold()
+            score = 0
+            for old in old_terms:
+                if old.casefold() in folded:
+                    score += 100
+            if object_id in source_ids:
+                score += 20
+            score += sum(1 for term in query_terms if term in folded)
+            if score > 0:
+                scores[object_id] = score
+        for object_id in source_ids:
+            scores.setdefault(object_id, 10)
+        return [object_id for object_id, _score in sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]]
+
+    @staticmethod
+    def _knowledge_object_label(repo: KnowledgeRepository, object_id: str) -> str:
+        path = repo._canonical_object_path(object_id)
+        if not path:
+            return f"`{object_id}`"
+        data = repo._read_json(path)
+        title = str(data.get("title") or object_id)
+        object_type = str(data.get("object_type") or path.parent.name)
+        return f"{title} (`{object_id}`, {object_type})"
+
+    def _revision_impact_preview(self, repo: KnowledgeRepository, *, metadata_path: Path) -> str:
+        data = repo._read_json(metadata_path)
+        object_id = str(data.get("object_id") or "")
+        correction = str(data.get("correction") or "")
+        replacements = [item for item in data.get("replacements") or [] if isinstance(item, dict)]
+        lines = [
+            "Эффект правки:",
+            f"- Объект: {self._knowledge_object_label(repo, object_id)}",
+            f"- Статус: {data.get('status') or 'draft'}",
+            "",
+            "Как изменятся ответы:",
+        ]
+        if replacements:
+            for item in replacements:
+                old = str(item.get("old") or "")
+                new = str(item.get("new") or "")
+                if old and new:
+                    lines.append(f"- В ответах и инструкциях `{old}` будет заменено на `{new}`.")
+            lines.append("- После применения индекс RAG пересоберется, поэтому поиск начнет находить нормализованные термины.")
+        else:
+            lines.append("- Корректировка будет добавлена в историю объекта и учтена при следующем пересборе связанных инструкций.")
+        related = self._affected_revision_object_ids(
+            repo,
+            query=correction,
+            source_ids=[object_id],
+            replacements=[(str(item.get("old") or ""), str(item.get("new") or "")) for item in replacements],
+        )
+        instruction_ids = [item for item in related if item.startswith("instruction__")]
+        if instruction_ids:
+            lines.extend(["", "Связанные инструкции:"])
+            lines.extend(f"- {self._knowledge_object_label(repo, item)}" for item in instruction_ids[:5])
+        lines.extend(["", "Исходная корректировка:", correction])
+        return "\n".join(lines)[:3900]
+
+    def _revision_batch_impact_preview(self, repo: KnowledgeRepository, *, proposals: list[dict]) -> str:
+        metadata_paths = [Path(str(item.get("_metadata_path") or item.get("metadata_path") or "")) for item in proposals]
+        loaded = [repo._read_json(path) for path in metadata_paths if str(path) and path.exists()]
+        loaded = [item for item in loaded if item]
+        replacements: list[dict] = []
+        seen_replacements: set[tuple[str, str]] = set()
+        object_ids: list[str] = []
+        correction = ""
+        for item in loaded:
+            object_id = str(item.get("object_id") or "")
+            if object_id:
+                object_ids.append(object_id)
+            correction = correction or str(item.get("correction") or "")
+            for replacement in item.get("replacements") or []:
+                if not isinstance(replacement, dict):
+                    continue
+                old = str(replacement.get("old") or "")
+                new = str(replacement.get("new") or "")
+                key = (old.casefold(), new.casefold())
+                if old and new and key not in seen_replacements:
+                    seen_replacements.add(key)
+                    replacements.append({"old": old, "new": new})
+        lines = [f"Эффект правки: будет затронуто объектов: {len(object_ids)}."]
+        if replacements:
+            lines.extend(["", "Что изменится в ответах и инструкциях:"])
+            lines.extend(f"- `{item['old']}` будет заменено на `{item['new']}`." for item in replacements)
+            lines.append("- После применения база пересоберет markdown, chunk index и RAG index.")
+        else:
+            lines.extend(["", "Что изменится:"])
+            lines.append("- Корректировка будет добавлена в связанные knowledge objects и учтена при пересборке базы.")
+        instruction_ids = [object_id for object_id in object_ids if object_id.startswith("instruction__")]
+        task_case_count = len([object_id for object_id in object_ids if object_id.startswith("task_case__")])
+        feature_count = len([object_id for object_id in object_ids if object_id.startswith("feature__")])
+        system_count = len([object_id for object_id in object_ids if object_id.startswith("system__")])
+        lines.extend(
             [
-                f"Создал черновик правки для `{proposal.object_id}`.",
                 "",
-                "Проверьте и выберите действие кнопкой ниже.",
+                "Где будет применено:",
+                f"- task cases: {task_case_count}",
+                f"- features: {feature_count}",
+                f"- systems: {system_count}",
+                f"- instructions: {len(instruction_ids)}",
             ]
         )
-        return TelegramResponse(ok=True, text=text, payload={"intent": "revise_knowledge", "query": query, "proposal": proposal.model_dump()})
+        if instruction_ids:
+            lines.extend(["", "Связанные инструкции:"])
+            lines.extend(f"- {self._knowledge_object_label(repo, object_id)}" for object_id in instruction_ids[:5])
+        if correction:
+            lines.extend(["", "Исходная корректировка:", correction])
+        return "\n".join(lines)[:3900]
+
+    @staticmethod
+    def _rebuild_knowledge_indexes(repo: KnowledgeRepository) -> None:
+        repo.build_index()
+        repo.build_chunk_index()
+        rag_client = client_from_env(dict(os.environ))
+        if rag_client:
+            KnowledgeVectorStore(
+                repo.root,
+                db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
+                embeddings_model=rag_client.embeddings_model,
+            ).build(client=rag_client, force=True)
 
     @classmethod
     def _should_handle_knowledge_ai(cls, text: str, *, message: dict) -> bool:
@@ -793,6 +983,8 @@ class TelegramBotFacade:
         key = self._knowledge_session_key(chat_id, user_id)
         session = self._knowledge_sessions.setdefault(key, {})
         payload = response.payload or {}
+        if payload.get("intent") == "export_bundle":
+            return
         if payload.get("query"):
             session["query"] = str(payload["query"])
         if payload.get("answer_mode"):
@@ -819,7 +1011,9 @@ class TelegramBotFacade:
     def _keyboard_for_response(self, response: TelegramResponse, *, chat_id: int | str | None, user_id: int | str | None) -> dict:
         payload = response.payload or {}
         key = self._knowledge_session_key(chat_id, user_id)
-        if payload.get("intent") == "proposals" and payload.get("proposals"):
+        if payload.get("intent") == "export_bundle":
+            return {}
+        if payload.get("proposals"):
             return self._proposal_review_keyboard(payload.get("proposals") or [], session_key=key)
         if payload.get("intent") == "revise_knowledge" and (payload.get("proposal") or {}).get("metadata_path"):
             return self._single_proposal_keyboard()
@@ -830,24 +1024,28 @@ class TelegramBotFacade:
     def _proposal_review_keyboard(self, proposals: list[dict], *, session_key: str) -> dict:
         refs: list[str] = []
         rows: list[list[dict[str, str]]] = []
-        for index, item in enumerate(proposals[:5]):
+        for item in proposals:
             metadata_path = str(item.get("_metadata_path") or item.get("metadata_path") or "")
-            if not metadata_path:
-                continue
-            refs.append(metadata_path)
-            rows.append(
-                [
-                    {"text": f"{index + 1} Показать", "callback_data": f"kb:proposal:show:{index}"},
-                    {"text": f"{index + 1} Принять", "callback_data": f"kb:proposal:approve:{index}"},
-                ]
-            )
-            rows.append(
-                [
-                    {"text": f"{index + 1} Применить", "callback_data": f"kb:proposal:apply:{index}"},
-                    {"text": f"{index + 1} Отклонить", "callback_data": f"kb:proposal:reject:{index}"},
-                ]
-            )
+            if metadata_path:
+                refs.append(metadata_path)
         self._proposal_refs[session_key] = refs
+        if len(refs) > 1:
+            rows.append(
+                [
+                    {"text": "Применить все", "callback_data": "kb:proposal:apply_all:0"},
+                    {"text": "Отклонить все", "callback_data": "kb:proposal:reject_all:0"},
+                ]
+            )
+        elif refs:
+            rows.extend(
+                [
+                    [
+                        {"text": "Показать эффект", "callback_data": "kb:proposal:show:0"},
+                        {"text": "Применить", "callback_data": "kb:proposal:apply:0"},
+                    ],
+                    [{"text": "Отклонить", "callback_data": "kb:proposal:reject:0"}],
+                ]
+            )
         rows.append([{"text": "Назад", "callback_data": "kb:menu"}])
         return {"inline_keyboard": rows}
 
@@ -856,7 +1054,7 @@ class TelegramBotFacade:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "Показать diff", "callback_data": f"kb:proposal:show:{index}"},
+                    {"text": "Показать эффект", "callback_data": f"kb:proposal:show:{index}"},
                     {"text": "Принять", "callback_data": f"kb:proposal:approve:{index}"},
                 ],
                 [
@@ -873,14 +1071,42 @@ class TelegramBotFacade:
         index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         repo = KnowledgeRepository(Path(os.environ.get("KNOWLEDGE_REPO_PATH", "company-knowledge")))
         refs = self._proposal_refs.get(session_key) or []
+        if operation in {"apply_all", "reject_all"}:
+            if not refs:
+                return self._run_knowledge_intent("proposals", "")
+            if operation == "reject_all":
+                rejected = []
+                for ref in refs:
+                    proposal = repo.set_revision_status(metadata_path=Path(ref), status="rejected")
+                    rejected.append(proposal.object_id)
+                return TelegramResponse(
+                    ok=True,
+                    text="Отклонил правки:\n" + "\n".join(f"- `{object_id}`" for object_id in rejected[:10]),
+                    payload={"intent": "proposal_action", "query": str((self._knowledge_sessions.get(session_key) or {}).get("query") or "")},
+                )
+            applied = []
+            query = str((self._knowledge_sessions.get(session_key) or {}).get("query") or "")
+            for ref in refs:
+                metadata_path = Path(ref)
+                data = repo._read_json(metadata_path)
+                if data.get("status") != "approved":
+                    repo.set_revision_status(metadata_path=metadata_path, status="approved")
+                proposal = repo.apply_resolved_revision(metadata_path=metadata_path)
+                applied.append(proposal.object_id)
+                query = query or proposal.correction or proposal.object_id
+            self._rebuild_knowledge_indexes(repo)
+            answer = self._answer_from_knowledge(repo, query or "что изменилось после правки", answer_mode="general")
+            text = "Применил правки ко связанным объектам:\n" + "\n".join(f"- `{object_id}`" for object_id in applied[:10])
+            text += "\n\nКак теперь будет отвечать база:\n" + str(answer.get("answer") or "").strip()
+            return TelegramResponse(ok=True, text=text[:3900], payload={"intent": "proposal_action", "query": query, "applied_count": len(applied)})
         metadata_path = Path(refs[index]) if index < len(refs) and refs[index] else None
         if not metadata_path:
             return self._run_knowledge_intent("proposals", "")
         if operation == "show":
-            diff = repo.revision_diff_text(metadata_path=metadata_path)
+            preview = self._revision_impact_preview(repo, metadata_path=metadata_path)
             return TelegramResponse(
                 ok=True,
-                text=f"Diff правки:\n{diff}",
+                text=preview,
                 payload={"intent": "proposal_action", "metadata_path": str(metadata_path), "proposal_index": index},
             )
         if operation in {"approve", "reject"}:
@@ -903,8 +1129,7 @@ class TelegramBotFacade:
             if data.get("status") != "approved":
                 repo.set_revision_status(metadata_path=metadata_path, status="approved")
             proposal = repo.apply_resolved_revision(metadata_path=metadata_path)
-            repo.build_index()
-            repo.build_chunk_index()
+            self._rebuild_knowledge_indexes(repo)
             query = proposal.correction or str((self._knowledge_sessions.get(session_key) or {}).get("query") or proposal.object_id)
             answer = self._answer_from_knowledge(repo, query, answer_mode="general")
             text = "Правка применена.\n\nКак теперь работает функционал:\n" + str(answer.get("answer") or "").strip()

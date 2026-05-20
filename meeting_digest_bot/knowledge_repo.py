@@ -320,11 +320,12 @@ class KnowledgeRepository:
         *,
         object_id: str,
         correction: str,
+        replacements: list[dict[str, str]] | None = None,
         output_dir: Path | None = None,
     ) -> KnowledgeRevisionProposal:
-        source_path = self.root / "knowledge" / "task_cases" / f"{object_id}.json"
-        if not source_path.exists():
-            raise FileNotFoundError(f"Knowledge object is not found: {source_path}")
+        source_path = self._canonical_object_path(object_id)
+        if not source_path:
+            raise FileNotFoundError(f"Knowledge object is not found: {object_id}")
         data = self._read_json(source_path)
         created_at = datetime.now(UTC).isoformat()
         proposal_dir = output_dir or (self.root / "knowledge" / "drafts")
@@ -343,6 +344,7 @@ class KnowledgeRepository:
                     "source_path": str(source_path),
                     "created_at": created_at,
                     "applied_at": None,
+                    "replacements": replacements or [],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -476,6 +478,9 @@ class KnowledgeRepository:
             raise ValueError("Revision proposal must be approved before apply.")
         source_path = Path(str(data.get("source_path") or ""))
         source = self._read_json(source_path)
+        replacements = [item for item in data.get("replacements") or [] if isinstance(item, dict)]
+        if replacements:
+            source = self._apply_text_replacements(source, replacements)
         history = source.get("revision_history")
         if not isinstance(history, list):
             history = []
@@ -483,6 +488,7 @@ class KnowledgeRepository:
             {
                 "correction": data.get("correction"),
                 "proposal_path": data.get("proposal_path"),
+                "replacements": replacements,
                 "applied_at": datetime.now(UTC).isoformat(),
                 "status": "applied",
             }
@@ -490,6 +496,7 @@ class KnowledgeRepository:
         source["revision_history"] = history
         source["needs_human_review"] = False
         source_path.write_text(json.dumps(source, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._rewrite_object_artifacts(source_path, source)
         data["status"] = "applied"
         data["applied_at"] = datetime.now(UTC).isoformat()
         metadata_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1141,6 +1148,22 @@ class KnowledgeRepository:
             json.dumps(self._catalog_notion_projection(item, database=database), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _apply_text_replacements(value: Any, replacements: list[dict[str, str]]) -> Any:
+        if isinstance(value, str):
+            updated = value
+            for item in replacements:
+                old = str(item.get("old") or "")
+                new = str(item.get("new") or "")
+                if old and new:
+                    updated = updated.replace(old, new)
+            return updated
+        if isinstance(value, list):
+            return [KnowledgeRepository._apply_text_replacements(item, replacements) for item in value]
+        if isinstance(value, dict):
+            return {key: KnowledgeRepository._apply_text_replacements(item, replacements) for key, item in value.items()}
+        return value
 
     def _merge_with_existing(self, item: KnowledgeObject) -> KnowledgeObject:
         path = self.root / "knowledge" / "task_cases" / f"{item.object_id}.json"

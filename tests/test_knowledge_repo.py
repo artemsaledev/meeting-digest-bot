@@ -110,6 +110,34 @@ class KnowledgeRepositoryTests(unittest.TestCase):
             data = json.loads((Path(tmp) / "knowledge" / "task_cases" / "task_case__bitrix_123.json").read_text(encoding="utf-8"))
             self.assertEqual(data["revision_history"][0]["status"], "applied")
 
+    def test_revision_apply_normalizes_terms_in_object_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = KnowledgeRepository(Path(tmp))
+            item = knowledge_object().model_copy(
+                update={
+                    "current_summary": "Сборочный документ связан с ВМС и ИГРА.",
+                    "current_requirements": ["Проверить ВМС и ИГРА для сборочного документа."],
+                }
+            )
+            repo.upsert_objects([item])
+            proposal = repo.create_revision_proposal(
+                object_id=item.object_id,
+                correction='замени "ВМС" на "WMS" и "ИГРА" на "CRM"',
+                replacements=[{"old": "ВМС", "new": "WMS"}, {"old": "ИГРА", "new": "CRM"}],
+            )
+            repo.set_revision_status(metadata_path=Path(proposal.metadata_path), status="approved")
+            repo.apply_resolved_revision(metadata_path=Path(proposal.metadata_path))
+
+            object_path = Path(tmp) / "knowledge" / "task_cases" / f"{item.object_id}.json"
+            data = json.loads(object_path.read_text(encoding="utf-8"))
+            self.assertIn("WMS", data["current_summary"])
+            self.assertIn("CRM", data["current_summary"])
+            self.assertNotIn("ВМС", data["current_summary"])
+            self.assertNotIn("ИГРА", data["current_requirements"][0])
+            markdown = object_path.with_suffix(".md").read_text(encoding="utf-8")
+            self.assertIn("WMS", markdown)
+            self.assertIn("CRM", markdown)
+
     def test_chunk_index_external_export_and_notion_guard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = KnowledgeRepository(Path(tmp))
