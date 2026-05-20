@@ -72,6 +72,30 @@ class TelegramTaskRoutingTests(unittest.TestCase):
         self.assertEqual(len(bot.fake_service.sync_post_requests), 1)
         self.assertEqual(bot.fake_service.sync_post_requests[0].post_url, "https://t.me/c/123/90")
 
+    def test_llmeets_russian_comment_reply_to_meeting_routes_to_post_sync(self) -> None:
+        bot = _FakeBot()
+        result = bot.process_update(
+            {
+                "message": {
+                    "message_id": 103,
+                    "text": "@LLMeets_bot комментарий 147721",
+                    "chat": {"id": -100123},
+                    "from": {"id": 7},
+                    "reply_to_message": {
+                        "message_id": 91,
+                        "text": "Встреча: #task_demo 20.05 Вопросы по базе знаний https://loom.com/share/abc",
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.payload["action"], "append_comment")
+        self.assertEqual(bot.fake_service.task_extractor.requests, [])
+        self.assertEqual(len(bot.fake_service.sync_post_requests), 1)
+        self.assertEqual(bot.fake_service.sync_post_requests[0].task_id, 147721)
+        self.assertEqual(bot.fake_service.sync_post_requests[0].post_url, "https://t.me/c/123/91")
+
     def test_llmeets_create_without_meeting_context_does_not_route_to_task_extractor(self) -> None:
         bot = _FakeBot()
         result = bot.process_update(

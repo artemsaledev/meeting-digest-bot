@@ -1349,8 +1349,8 @@ class TelegramBotFacade:
             (TaskExtractorAction.export, [" export ", " /export ", " выгрузка ", " /выгрузка "]),
             (TaskExtractorAction.create, [" create ", " /create ", " создать ", " /создать "]),
             (TaskExtractorAction.update, [" update ", " /update ", " обновить ", " /обновить "]),
-            (TaskExtractorAction.comment, [" comment ", " /comment ", " коммент ", " /коммент "]),
-            (TaskExtractorAction.checklist, [" checklist ", " /checklist ", " чеклист ", " /чеклист "]),
+            (TaskExtractorAction.comment, [" comment ", " /comment ", " коммент ", " /коммент ", " комментарий ", " /комментарий ", " комментарии ", " /комментарии "]),
+            (TaskExtractorAction.checklist, [" checklist ", " /checklist ", " чеклист ", " /чеклист ", " чек-лист ", " /чек-лист "]),
             (TaskExtractorAction.clear, [" clear ", " /clear ", " очистить ", " /очистить "]),
             (TaskExtractorAction.status, [" status ", " /status ", " статус ", " /статус "]),
         ]
