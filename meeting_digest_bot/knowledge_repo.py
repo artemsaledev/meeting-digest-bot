@@ -321,6 +321,7 @@ class KnowledgeRepository:
         object_id: str,
         correction: str,
         replacements: list[dict[str, str]] | None = None,
+        trusted_sources: list[dict[str, Any]] | None = None,
         output_dir: Path | None = None,
     ) -> KnowledgeRevisionProposal:
         source_path = self._canonical_object_path(object_id)
@@ -345,6 +346,7 @@ class KnowledgeRepository:
                     "created_at": created_at,
                     "applied_at": None,
                     "replacements": replacements or [],
+                    "trusted_sources": trusted_sources or [],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -489,6 +491,7 @@ class KnowledgeRepository:
                 "correction": data.get("correction"),
                 "proposal_path": data.get("proposal_path"),
                 "replacements": replacements,
+                "trusted_sources": data.get("trusted_sources") or [],
                 "applied_at": datetime.now(UTC).isoformat(),
                 "status": "applied",
             }

@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -53,6 +55,20 @@ class FakeCorrectionClient:
             '"replacements":[{"old":"Исправдания","new":"исправление","reason":"speech transcript typo"}],'
             '"notes":["очищено из голосовой транскрипции"],"confidence":"medium"}'
         )
+
+
+class FakeHTTPResponse:
+    def __init__(self, text: str = "", status_code: int = 200, payload: dict | None = None) -> None:
+        self.text = text
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
 
 
 class TelegramKnowledgeAiTests(unittest.TestCase):
@@ -442,6 +458,56 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             proposal = result.payload["proposal"]
             self.assertIn("исправь знание: бонусы зависят", proposal["correction"])
             self.assertEqual(result.payload["normalization"]["confidence"], "medium")
+
+    def test_revision_uses_task_extractor_notebooklm_bundle_as_trusted_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.build_index()
+            repo.build_chunk_index()
+            buffer = BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr("source_bundle/01_instruction.md", "# Проверенная инструкция\nБонусы распределяются пропорционально.")
+
+            bot = FakeTelegramBot()
+            with patch.object(bot, "_download_telegram_file", return_value=buffer.getvalue()), patch.object(
+                bot,
+                "_answer_from_knowledge",
+                return_value={"answer": "ok", "sources": [{"object_id": knowledge_object().object_id, "title": "Bitrix checklist", "snippets": []}]},
+            ), patch("meeting_digest_bot.telegram_bot.client_from_env", return_value=FakeCorrectionClient()):
+                result = bot.process_update(
+                    {
+                        "message": {
+                            "message_id": 233,
+                            "text": "@LLMeets_bot правка: исправь знание, учти проверенную инструкцию",
+                            "chat": {"id": 123},
+                            "from": {"id": 7},
+                            "document": {"file_id": "bundle1", "file_name": "notebooklm.zip"},
+                        }
+                    }
+                )
+
+            self.assertTrue(result.ok)
+            trusted_sources = result.payload["normalization"]["trusted_sources"]
+            self.assertEqual(trusted_sources[0]["type"], "notebooklm_bundle")
+            self.assertEqual(trusted_sources[0]["status"], "fetched")
+            self.assertIn("Проверенная инструкция", trusted_sources[0]["text"])
+            metadata = KnowledgeRepository(Path(tmp))._read_json(Path(result.payload["proposal"]["metadata_path"]))
+            self.assertEqual(metadata["trusted_sources"][0]["type"], "notebooklm_bundle")
+
+    def test_revision_fetches_google_doc_link_as_trusted_source(self) -> None:
+        bot = FakeTelegramBot()
+        with patch("meeting_digest_bot.telegram_bot.requests.get", return_value=FakeHTTPResponse("Проверенная инструкция из Google Doc")) as mocked_get:
+            sources = bot._extract_trusted_revision_sources("исправь по https://docs.google.com/document/d/doc123/edit")
+
+        self.assertEqual(sources[0]["type"], "google_doc")
+        self.assertEqual(sources[0]["status"], "fetched")
+        self.assertIn("Проверенная инструкция", sources[0]["text"])
+        self.assertIn("/document/d/doc123/export?format=txt", mocked_get.call_args.args[0])
 
     def test_mention_health_routes_to_knowledge_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):

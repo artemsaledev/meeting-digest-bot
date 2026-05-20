@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+import html
+from io import BytesIO
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
+import zipfile
+from urllib.parse import parse_qs, quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -54,6 +58,7 @@ WEEKLY_REPORT_COMMAND_RE = re.compile(
 )
 LOOM_URL_RE = re.compile(r"https?://(?:www\.)?loom\.com/share/([A-Za-z0-9]+)[^\s]*", re.IGNORECASE)
 GOOGLE_DOC_RE = re.compile(r"https?://docs\.google\.com/document/d/[^\s)]+", re.IGNORECASE)
+TRUSTED_SOURCE_URL_RE = re.compile(r"https?://[^\s<>)]+", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -486,11 +491,13 @@ class TelegramBotFacade:
         if intent == "menu":
             return TelegramResponse(ok=True, text=self._knowledge_menu_text(), payload={"intent": "menu"})
         chat = message.get("chat") or {}
+        trusted_sources = self._trusted_sources_from_message(message)
         return self._run_knowledge_intent(
             intent,
             query,
             telegram_chat_id=chat.get("id"),
             telegram_reply_to_message_id=message.get("message_id"),
+            trusted_sources=trusted_sources,
         )
 
     def _run_knowledge_intent(
@@ -500,6 +507,7 @@ class TelegramBotFacade:
         *,
         telegram_chat_id: int | str | None = None,
         telegram_reply_to_message_id: int | str | None = None,
+        trusted_sources: list[dict] | None = None,
     ) -> TelegramResponse:
         repo = KnowledgeRepository(Path(os.environ.get("KNOWLEDGE_REPO_PATH", "company-knowledge")))
         if intent in {"health", "status"}:
@@ -538,7 +546,7 @@ class TelegramBotFacade:
                 payload={"intent": "export_bundle", "query": query, "attachment_path": zip_path, "result": result.model_dump()},
             )
         if intent in {"revise", "revise_knowledge"}:
-            return self._create_knowledge_revision_from_query(repo, query)
+            return self._create_knowledge_revision_from_query(repo, query, trusted_sources=trusted_sources or [])
 
         answer_mode = {
             "instruction": "user_instruction",
@@ -616,9 +624,9 @@ class TelegramBotFacade:
             return query
         return query + "\n\nПоисковые синонимы и связанные термины:\n" + "\n".join(f"- {hint}" for hint in hints)
 
-    def _create_knowledge_revision_from_query(self, repo: KnowledgeRepository, query: str) -> TelegramResponse:
+    def _create_knowledge_revision_from_query(self, repo: KnowledgeRepository, query: str, *, trusted_sources: list[dict] | None = None) -> TelegramResponse:
         result = self._answer_from_knowledge(repo, query, answer_mode="general")
-        normalized = self._normalize_revision_query(repo, query=query, answer_result=result)
+        normalized = self._normalize_revision_query(repo, query=query, answer_result=result, extra_trusted_sources=trusted_sources or [])
         cleaned_query = str(normalized.get("cleaned_query") or query).strip() or query
         replacements = [
             (str(item.get("old") or ""), str(item.get("new") or ""))
@@ -642,6 +650,7 @@ class TelegramBotFacade:
                 object_id=object_id,
                 correction=cleaned_query,
                 replacements=[{"old": old, "new": new} for old, new in replacements],
+                trusted_sources=normalized.get("trusted_sources") or [],
             ).model_dump()
             for object_id in object_ids
         ]
@@ -675,7 +684,8 @@ class TelegramBotFacade:
             },
         )
 
-    def _normalize_revision_query(self, repo: KnowledgeRepository, *, query: str, answer_result: dict) -> dict:
+    def _normalize_revision_query(self, repo: KnowledgeRepository, *, query: str, answer_result: dict, extra_trusted_sources: list[dict] | None = None) -> dict:
+        trusted_sources = [*(extra_trusted_sources or []), *self._extract_trusted_revision_sources(query)]
         fallback_replacements = [{"old": old, "new": new} for old, new in self._extract_term_replacements(query)]
         fallback = {
             "cleaned_query": query,
@@ -683,6 +693,7 @@ class TelegramBotFacade:
             "notes": [],
             "confidence": "low" if not fallback_replacements else "medium",
             "used_ai": False,
+            "trusted_sources": trusted_sources,
         }
         client = client_from_env(dict(os.environ), require_llm=True)
         if not client or not hasattr(client, "complete_messages"):
@@ -698,12 +709,29 @@ class TelegramBotFacade:
                     ]
                 )
             )
+        trusted_source_lines = []
+        for idx, item in enumerate(trusted_sources, start=1):
+            trusted_source_lines.append(
+                "\n".join(
+                    [
+                        f"[trusted_source_{idx}]",
+                        f"type: {item.get('type')}",
+                        f"url: {item.get('url')}",
+                        f"title: {item.get('title') or '-'}",
+                        f"status: {item.get('status')}",
+                        "text:",
+                        str(item.get("text") or item.get("message") or "")[:12000],
+                    ]
+                )
+            )
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You clean noisy speech-to-text corrections for a company knowledge base. "
                     "Do not invent product behavior. Preserve the user's intent. "
+                    "If trusted source text is provided, use it as the strongest evidence for the correction. "
+                    "If a trusted source is unavailable, mention that in notes and do not invent its content. "
                     "Normalize obvious transcription mistakes only when the source context or the user wording supports it. "
                     "Extract explicit terminology replacements such as 'old term should be new term'. "
                     "Return strict JSON with keys: cleaned_query, replacements, notes, confidence. "
@@ -716,6 +744,8 @@ class TelegramBotFacade:
                 "content": (
                     "Raw correction transcript:\n"
                     f"{query}\n\n"
+                    "Trusted correction sources from user URLs:\n"
+                    f"{chr(10).join(trusted_source_lines) or '-'}\n\n"
                     "Relevant knowledge sources:\n"
                     f"{chr(10).join(source_lines) or '-'}\n\n"
                     "Return only JSON."
@@ -756,7 +786,214 @@ class TelegramBotFacade:
             "notes": [str(item) for item in notes if str(item).strip()][:5],
             "confidence": str(parsed.get("confidence") or "medium"),
             "used_ai": True,
+            "trusted_sources": trusted_sources,
         }
+
+    def _extract_trusted_revision_sources(self, query: str) -> list[dict]:
+        sources: list[dict] = []
+        seen: set[str] = set()
+        for match in TRUSTED_SOURCE_URL_RE.finditer(query):
+            url = match.group(0).rstrip(".,;:)]}")
+            if url in seen:
+                continue
+            seen.add(url)
+            source_type = self._trusted_source_type(url)
+            if source_type not in {"google_doc", "notion", "youtube"}:
+                continue
+            sources.append(self._fetch_trusted_revision_source(url, source_type=source_type))
+        return sources[:5]
+
+    def _trusted_sources_from_message(self, message: dict) -> list[dict]:
+        document = message.get("document") or {}
+        if not document:
+            return []
+        file_name = str(document.get("file_name") or "telegram_document").strip() or "telegram_document"
+        file_id = str(document.get("file_id") or "").strip()
+        if not file_id:
+            return []
+        try:
+            content = self._download_telegram_file(file_id)
+            if not content:
+                return []
+            source = self._trusted_source_from_file_bytes(content, file_name=file_name)
+            return [source] if source else []
+        except Exception as exc:
+            return [
+                {
+                    "url": f"telegram:{file_name}",
+                    "type": "telegram_document",
+                    "status": "unavailable",
+                    "title": file_name,
+                    "text": "",
+                    "message": f"Telegram document fetch failed: {exc}",
+                }
+            ]
+
+    def _download_telegram_file(self, file_id: str) -> bytes:
+        file_info = requests.get(self.api_url + "getFile", params={"file_id": file_id}, timeout=30)
+        file_info.raise_for_status()
+        file_path = ((file_info.json().get("result") or {}).get("file_path") or "").strip()
+        if not file_path:
+            return b""
+        download = requests.get(f"https://api.telegram.org/file/bot{self.token}/{file_path}", timeout=120)
+        download.raise_for_status()
+        return download.content
+
+    def _trusted_source_from_file_bytes(self, content: bytes, *, file_name: str) -> dict:
+        suffix = Path(file_name).suffix.casefold()
+        base = {"url": f"telegram:{file_name}", "type": "telegram_document", "status": "unavailable", "title": file_name, "text": "", "message": ""}
+        if suffix == ".zip":
+            text = self._extract_text_from_zip_bundle(content)
+            return {
+                **base,
+                "type": "notebooklm_bundle",
+                "status": "fetched" if text else "unavailable",
+                "text": text,
+                "message": "" if text else "No supported .md/.txt/.json files found in bundle.",
+            }
+        if suffix in {".md", ".markdown", ".txt", ".json"}:
+            text = self._decode_text_bytes(content)
+            return {**base, "type": "trusted_file", "status": "fetched" if text else "unavailable", "text": text}
+        return {**base, "message": "Unsupported trusted source file type. Use .md, .txt, .json, or .zip bundle."}
+
+    @staticmethod
+    def _decode_text_bytes(content: bytes) -> str:
+        for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+            try:
+                return TelegramBotFacade._clean_source_text(content.decode(encoding))
+            except UnicodeDecodeError:
+                continue
+        return ""
+
+    @staticmethod
+    def _extract_text_from_zip_bundle(content: bytes) -> str:
+        chunks: list[str] = []
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            for info in archive.infolist():
+                if info.is_dir() or info.file_size > 2_000_000:
+                    continue
+                suffix = Path(info.filename).suffix.casefold()
+                if suffix not in {".md", ".markdown", ".txt", ".json"}:
+                    continue
+                with archive.open(info) as file:
+                    text = TelegramBotFacade._decode_text_bytes(file.read())
+                if text:
+                    chunks.append(f"# {info.filename}\n{text[:12000]}")
+                if sum(len(item) for item in chunks) > 30000:
+                    break
+        return "\n\n".join(chunks)[:30000]
+
+    @staticmethod
+    def _trusted_source_type(url: str) -> str:
+        host = (urlparse(url).netloc or "").casefold()
+        if "docs.google.com" in host:
+            return "google_doc"
+        if "notion.so" in host or "notion.site" in host:
+            return "notion"
+        if "youtube.com" in host or "youtu.be" in host:
+            return "youtube"
+        return "web"
+
+    def _fetch_trusted_revision_source(self, url: str, *, source_type: str) -> dict:
+        base = {"url": url, "type": source_type, "status": "unavailable", "title": "", "text": "", "message": ""}
+        try:
+            if source_type == "google_doc":
+                text = self._fetch_google_doc_text(url)
+                return {**base, "status": "fetched" if text else "unavailable", "text": text, "message": "" if text else "Google Doc text is not publicly readable from the server."}
+            if source_type == "youtube":
+                return {**base, **self._fetch_youtube_source(url)}
+            text = self._fetch_public_page_text(url)
+            return {**base, "status": "fetched" if text else "unavailable", "text": text, "message": "" if text else "Page text is not publicly readable from the server."}
+        except Exception as exc:
+            return {**base, "message": f"Source fetch failed: {exc}"}
+
+    @staticmethod
+    def _fetch_google_doc_text(url: str) -> str:
+        match = re.search(r"/document/d/([^/]+)", url)
+        if not match:
+            return ""
+        export_url = f"https://docs.google.com/document/d/{match.group(1)}/export?format=txt"
+        response = requests.get(export_url, timeout=30)
+        if response.status_code >= 400:
+            return ""
+        return TelegramBotFacade._clean_source_text(response.text)
+
+    @staticmethod
+    def _fetch_youtube_source(url: str) -> dict:
+        video_id = TelegramBotFacade._youtube_video_id(url)
+        title = ""
+        try:
+            oembed = requests.get(
+                "https://www.youtube.com/oembed",
+                params={"url": url, "format": "json"},
+                timeout=20,
+            )
+            if oembed.status_code < 400:
+                title = str((oembed.json() or {}).get("title") or "")
+        except Exception:
+            title = ""
+        if not video_id:
+            return {"status": "unavailable", "title": title, "text": "", "message": "Could not parse YouTube video id."}
+        text = TelegramBotFacade._fetch_youtube_captions(video_id)
+        if text:
+            return {"status": "fetched", "title": title, "text": text, "message": ""}
+        return {
+            "status": "metadata_only",
+            "title": title,
+            "text": f"YouTube video: {title or video_id}",
+            "message": "Captions/transcript are not publicly available to the server.",
+        }
+
+    @staticmethod
+    def _youtube_video_id(url: str) -> str:
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").casefold()
+        if "youtu.be" in host:
+            return parsed.path.strip("/").split("/")[0]
+        query_id = (parse_qs(parsed.query).get("v") or [""])[0]
+        if query_id:
+            return query_id
+        match = re.search(r"/(?:embed|shorts)/([^/?#]+)", parsed.path)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _fetch_youtube_captions(video_id: str) -> str:
+        languages = ["ru", "uk", "en"]
+        for lang in languages:
+            response = requests.get(
+                "https://www.youtube.com/api/timedtext",
+                params={"v": video_id, "lang": lang, "fmt": "vtt"},
+                timeout=20,
+            )
+            if response.status_code < 400 and response.text.strip():
+                return TelegramBotFacade._clean_youtube_caption_text(response.text)
+        return ""
+
+    @staticmethod
+    def _fetch_public_page_text(url: str) -> str:
+        response = requests.get(url, timeout=30, headers={"User-Agent": "meeting-digest-bot/1.0"})
+        if response.status_code >= 400:
+            return ""
+        return TelegramBotFacade._clean_source_text(response.text)
+
+    @staticmethod
+    def _clean_source_text(text: str) -> str:
+        text = html.unescape(text or "")
+        text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", text)
+        text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:30000]
+
+    @staticmethod
+    def _clean_youtube_caption_text(text: str) -> str:
+        lines = []
+        for line in (text or "").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped == "WEBVTT" or "-->" in stripped or stripped.isdigit():
+                continue
+            lines.append(re.sub(r"<[^>]+>", "", html.unescape(stripped)))
+        return TelegramBotFacade._clean_source_text(" ".join(lines))
 
     @staticmethod
     def _parse_json_object(content: str) -> dict | None:
@@ -880,11 +1117,20 @@ class TelegramBotFacade:
         seen_replacements: set[tuple[str, str]] = set()
         object_ids: list[str] = []
         correction = ""
+        trusted_sources: list[dict] = []
+        seen_source_urls: set[str] = set()
         for item in loaded:
             object_id = str(item.get("object_id") or "")
             if object_id:
                 object_ids.append(object_id)
             correction = correction or str(item.get("correction") or "")
+            for source in item.get("trusted_sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                source_key = str(source.get("url") or source.get("title") or "")
+                if source_key and source_key not in seen_source_urls:
+                    seen_source_urls.add(source_key)
+                    trusted_sources.append(source)
             for replacement in item.get("replacements") or []:
                 if not isinstance(replacement, dict):
                     continue
@@ -895,6 +1141,11 @@ class TelegramBotFacade:
                     seen_replacements.add(key)
                     replacements.append({"old": old, "new": new})
         lines = [f"Эффект правки: будет затронуто объектов: {len(object_ids)}."]
+        if trusted_sources:
+            lines.extend(["", "Проверенные источники учтены:"])
+            for source in trusted_sources[:5]:
+                label = source.get("title") or source.get("url") or source.get("type")
+                lines.append(f"- {label} ({source.get('type')}, {source.get('status')})")
         if replacements:
             lines.extend(["", "Что изменится в ответах и инструкциях:"])
             lines.extend(f"- `{item['old']}` будет заменено на `{item['new']}`." for item in replacements)
