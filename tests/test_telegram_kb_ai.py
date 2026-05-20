@@ -207,6 +207,53 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertEqual(result.payload["intent"], "ask")
             self.assertTrue(bot.messages)
 
+    def test_unrecognized_direct_voice_does_not_queue_notebooklm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "KNOWLEDGE_REPO_PATH": tmp,
+                "KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT": str(Path(tmp) / "notebooklm"),
+                "KNOWLEDGE_RAG_API_KEY": "",
+                "OPENAI_API_KEY": "",
+                "LLM_API_KEY": "",
+            },
+            clear=False,
+        ):
+            bot = FakeTelegramBot()
+            with patch.object(bot, "_transcribe_telegram_audio", return_value=""):
+                result = bot.process_update(
+                    {
+                        "message": {
+                            "message_id": 13,
+                            "chat": {"id": 123},
+                            "voice": {"file_id": "voice-empty"},
+                        }
+                    }
+                )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.payload["intent"], "voice_transcription_failed")
+            self.assertFalse(result.payload["notebooklm_queued"])
+            self.assertTrue(bot.messages)
+            self.assertFalse((Path(tmp) / "notebooklm").exists())
+
+    def test_empty_notebooklm_followup_is_not_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT": str(Path(tmp) / "notebooklm")},
+            clear=False,
+        ):
+            path = TelegramBotFacade._queue_notebooklm_followup(
+                query="",
+                answer="answer",
+                sources=[],
+                answer_mode="general",
+                telegram_chat_id=123,
+            )
+
+            self.assertEqual(path, "")
+            self.assertFalse((Path(tmp) / "notebooklm").exists())
+
     def test_kb_menu_uses_russian_buttons(self) -> None:
         bot = FakeTelegramBot()
         result = bot.process_update({"message": {"message_id": 20, "text": "@LLMeets_bot kb", "chat": {"id": 123}, "from": {"id": 7}}})

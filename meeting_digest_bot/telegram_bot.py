@@ -68,6 +68,14 @@ class TelegramBotFacade:
     def api_url(self) -> str:
         return f"https://api.telegram.org/bot{self.token}/"
 
+    @staticmethod
+    def _voice_transcription_failed_response() -> TelegramResponse:
+        return TelegramResponse(
+            ok=False,
+            text="Не удалось распознать голосовое сообщение. NotebookLM не запускал. Отправьте voice еще раз или напишите запрос текстом.",
+            payload={"intent": "voice_transcription_failed", "notebooklm_queued": False},
+        )
+
     def process_update(self, update: dict) -> TelegramResponse:
         callback_response = self._process_callback_query(update.get("callback_query") or {})
         if callback_response:
@@ -77,8 +85,14 @@ class TelegramBotFacade:
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         text = self._normalize_text(message.get("text") or message.get("caption") or "")
+        direct_audio_message = bool(message.get("voice") or message.get("audio")) and not text
         if not text and (message.get("voice") or message.get("audio")):
             text = self._transcribe_telegram_audio(message)
+            if not text:
+                response = self._voice_transcription_failed_response()
+                if chat_id:
+                    self.send_message(chat_id, response.text, reply_to_message_id=message.get("message_id"))
+                return response
         if BOT_MENTION_RE.search(text):
             reply = message.get("reply_to_message") or {}
             if reply.get("voice") or reply.get("audio"):
@@ -89,14 +103,7 @@ class TelegramBotFacade:
                     if transcribed:
                         text = f"@LLMeets_bot {voice_action} {transcribed}".strip()
                     else:
-                        response = TelegramResponse(
-                            ok=False,
-                            text=(
-                                "Не удалось распознать голосовое сообщение. "
-                                "Попробуйте отправить voice еще раз или напишите запрос текстом."
-                            ),
-                            payload={"intent": "voice_transcription_failed"},
-                        )
+                        response = self._voice_transcription_failed_response()
                         if chat_id:
                             self.send_message(chat_id, response.text, reply_to_message_id=message.get("message_id"))
                         return response
@@ -107,18 +114,16 @@ class TelegramBotFacade:
                 if transcribed:
                     text = transcribed
                 else:
-                    response = TelegramResponse(
-                        ok=False,
-                        text=(
-                            "Не удалось распознать голосовое сообщение. "
-                            "Напишите запрос текстом или попробуйте отправить voice еще раз и ответить на него `@LLMeets_bot`."
-                        ),
-                        payload={"intent": "voice_transcription_failed"},
-                    )
+                    response = self._voice_transcription_failed_response()
                     if chat_id:
                         self.send_message(chat_id, response.text, reply_to_message_id=message.get("message_id"))
                     return response
         if not text:
+            if direct_audio_message:
+                response = self._voice_transcription_failed_response()
+                if chat_id:
+                    self.send_message(chat_id, response.text, reply_to_message_id=message.get("message_id"))
+                return response
             return TelegramResponse(
                 ok=False,
                 text="Пришлите ссылку на пост Telegram и, при необходимости, номер задачи.",
@@ -1304,6 +1309,10 @@ class TelegramBotFacade:
         telegram_chat_id: int | str | None = None,
         telegram_reply_to_message_id: int | str | None = None,
     ) -> str:
+        query = str(query or "").strip()
+        answer = str(answer or "").strip()
+        if not query or len(query) < 3:
+            return ""
         exports_root = os.environ.get("KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT")
         if not exports_root:
             return ""
