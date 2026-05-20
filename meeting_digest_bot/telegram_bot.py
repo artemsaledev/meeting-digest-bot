@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+import json
 import os
 from pathlib import Path
 import re
@@ -612,13 +613,19 @@ class TelegramBotFacade:
 
     def _create_knowledge_revision_from_query(self, repo: KnowledgeRepository, query: str) -> TelegramResponse:
         result = self._answer_from_knowledge(repo, query, answer_mode="general")
-        replacements = self._extract_term_replacements(query)
+        normalized = self._normalize_revision_query(repo, query=query, answer_result=result)
+        cleaned_query = str(normalized.get("cleaned_query") or query).strip() or query
+        replacements = [
+            (str(item.get("old") or ""), str(item.get("new") or ""))
+            for item in normalized.get("replacements") or []
+            if isinstance(item, dict) and str(item.get("old") or "").strip() and str(item.get("new") or "").strip()
+        ]
         source_ids: list[str] = []
         for item in result.get("sources") or []:
             object_id = str(item.get("object_id") or "")
             if object_id and object_id not in source_ids:
                 source_ids.append(object_id)
-        object_ids = self._affected_revision_object_ids(repo, query=query, source_ids=source_ids, replacements=replacements)
+        object_ids = self._affected_revision_object_ids(repo, query=cleaned_query, source_ids=source_ids, replacements=replacements)
         if not object_ids:
             return TelegramResponse(
                 ok=False,
@@ -628,12 +635,14 @@ class TelegramBotFacade:
         proposals = [
             repo.create_revision_proposal(
                 object_id=object_id,
-                correction=query,
+                correction=cleaned_query,
                 replacements=[{"old": old, "new": new} for old, new in replacements],
             ).model_dump()
             for object_id in object_ids
         ]
         lines = [f"Создал правки на проверку: {len(proposals)}."]
+        if normalized.get("used_ai") and cleaned_query != query:
+            lines.extend(["", "Как я понял правку после очистки транскрипции:", cleaned_query])
         if replacements:
             lines.extend(["", "Что реально изменится в ответах и инструкциях:"])
             lines.extend(f"- `{old}` будет трактоваться и записываться как `{new}`." for old, new in replacements)
@@ -652,12 +661,114 @@ class TelegramBotFacade:
             text=self._revision_batch_impact_preview(repo, proposals=proposals) if len(proposals) > 1 else "\n".join(lines)[:3900],
             payload={
                 "intent": "revise_knowledge",
-                "query": query,
+                "query": cleaned_query,
+                "raw_query": query,
+                "normalization": normalized,
                 "proposal": proposals[0] if len(proposals) == 1 else {},
                 "proposals": proposals,
                 "replacements": [{"old": old, "new": new} for old, new in replacements],
             },
         )
+
+    def _normalize_revision_query(self, repo: KnowledgeRepository, *, query: str, answer_result: dict) -> dict:
+        fallback_replacements = [{"old": old, "new": new} for old, new in self._extract_term_replacements(query)]
+        fallback = {
+            "cleaned_query": query,
+            "replacements": fallback_replacements,
+            "notes": [],
+            "confidence": "low" if not fallback_replacements else "medium",
+            "used_ai": False,
+        }
+        client = client_from_env(dict(os.environ), require_llm=True)
+        if not client or not hasattr(client, "complete_messages"):
+            return fallback
+        source_lines = []
+        for item in (answer_result.get("sources") or [])[:6]:
+            source_lines.append(
+                "\n".join(
+                    [
+                        f"- object_id: {item.get('object_id')}",
+                        f"  title: {item.get('title')}",
+                        f"  snippets: {' | '.join(str(snippet) for snippet in (item.get('snippets') or [])[:3])}",
+                    ]
+                )
+            )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You clean noisy speech-to-text corrections for a company knowledge base. "
+                    "Do not invent product behavior. Preserve the user's intent. "
+                    "Normalize obvious transcription mistakes only when the source context or the user wording supports it. "
+                    "Extract explicit terminology replacements such as 'old term should be new term'. "
+                    "Return strict JSON with keys: cleaned_query, replacements, notes, confidence. "
+                    "replacements must be an array of {old,new,reason}. "
+                    "If unsure, keep the original wording and put a note."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Raw correction transcript:\n"
+                    f"{query}\n\n"
+                    "Relevant knowledge sources:\n"
+                    f"{chr(10).join(source_lines) or '-'}\n\n"
+                    "Return only JSON."
+                ),
+            },
+        ]
+        try:
+            content = client.complete_messages(messages, temperature=0.0)
+            parsed = self._parse_json_object(content)
+        except Exception:
+            return fallback
+        if not isinstance(parsed, dict):
+            return fallback
+        cleaned = str(parsed.get("cleaned_query") or query).strip() or query
+        replacements = []
+        seen: set[tuple[str, str]] = set()
+        for item in parsed.get("replacements") or []:
+            if not isinstance(item, dict):
+                continue
+            old = str(item.get("old") or "").strip()
+            new = str(item.get("new") or "").strip()
+            if not old or not new or old.casefold() == new.casefold():
+                continue
+            key = (old.casefold(), new.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            replacements.append({"old": old, "new": new, "reason": str(item.get("reason") or "").strip()})
+        for item in fallback_replacements:
+            key = (item["old"].casefold(), item["new"].casefold())
+            if key not in seen:
+                replacements.append(item)
+                seen.add(key)
+        notes = parsed.get("notes") if isinstance(parsed.get("notes"), list) else []
+        return {
+            "cleaned_query": cleaned,
+            "replacements": replacements,
+            "notes": [str(item) for item in notes if str(item).strip()][:5],
+            "confidence": str(parsed.get("confidence") or "medium"),
+            "used_ai": True,
+        }
+
+    @staticmethod
+    def _parse_json_object(content: str) -> dict | None:
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                parsed = json.loads(text[start : end + 1])
+                return parsed if isinstance(parsed, dict) else None
+        return None
 
     @staticmethod
     def _extract_term_replacements(query: str) -> list[tuple[str, str]]:

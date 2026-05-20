@@ -113,6 +113,22 @@ class ExternalAIClient:
         message = choices[0].get("message") or {}
         return str(message.get("content") or "").strip() or "No answer returned by external LLM."
 
+    def complete_messages(self, messages: list[dict[str, str]], *, model: str | None = None, temperature: float = 0.1) -> str:
+        data = self._request(
+            "POST",
+            "/chat/completions",
+            {
+                "model": model or self.llm_model,
+                "messages": messages,
+                "temperature": temperature,
+            },
+        )
+        choices = data.get("choices") or []
+        if not choices:
+            return "No answer returned by external LLM."
+        message = choices[0].get("message") or {}
+        return str(message.get("content") or "").strip() or "No answer returned by external LLM."
+
     def _request(self, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = requests.request(
             method,

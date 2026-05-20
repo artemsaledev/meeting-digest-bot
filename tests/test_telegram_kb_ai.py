@@ -44,6 +44,17 @@ class FakeTelegramBot(TelegramBotFacade):
         self.callbacks.append(callback_query_id)
 
 
+class FakeCorrectionClient:
+    embeddings_model = "text-embedding-3-large"
+
+    def complete_messages(self, messages: list[dict[str, str]], *, model: str | None = None, temperature: float = 0.1) -> str:
+        return (
+            '{"cleaned_query":"исправь знание: бонусы зависят от процента распределения по сумме заказа и товарному составу",'
+            '"replacements":[{"old":"Исправдания","new":"исправление","reason":"speech transcript typo"}],'
+            '"notes":["очищено из голосовой транскрипции"],"confidence":"medium"}'
+        )
+
+
 class TelegramKnowledgeAiTests(unittest.TestCase):
     def test_natural_mention_runs_kb_ai_with_buttons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
@@ -349,6 +360,41 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             updated = (Path(tmp) / "knowledge" / "task_cases" / f"{item.object_id}.json").read_text(encoding="utf-8")
             self.assertIn("WMS", updated)
             self.assertIn("CRM", updated)
+
+    def test_revision_voice_like_correction_is_normalized_before_proposal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.build_index()
+            repo.build_chunk_index()
+
+            bot = FakeTelegramBot()
+            with patch.object(
+                bot,
+                "_answer_from_knowledge",
+                return_value={"answer": "ok", "sources": [{"object_id": knowledge_object().object_id, "title": "Bitrix checklist", "snippets": ["bonus typo"]}]},
+            ), patch("meeting_digest_bot.telegram_bot.client_from_env", return_value=FakeCorrectionClient()):
+                result = bot.process_update(
+                    {
+                        "message": {
+                            "message_id": 232,
+                            "text": "@LLMeets_bot Исправдания бонусы зависят от процента распределения по сумме заказа",
+                            "chat": {"id": 123},
+                            "from": {"id": 7},
+                        }
+                    }
+                )
+
+            self.assertTrue(result.ok)
+            self.assertIn("Как я понял правку", result.text)
+            self.assertIn("исправь знание: бонусы зависят", result.payload["query"])
+            proposal = result.payload["proposal"]
+            self.assertIn("исправь знание: бонусы зависят", proposal["correction"])
+            self.assertEqual(result.payload["normalization"]["confidence"], "medium")
 
     def test_mention_health_routes_to_knowledge_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):
