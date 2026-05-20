@@ -145,7 +145,7 @@ class NotebookLMAgent:
             pass
         return prompt_path
 
-    def open_auth(self, *, url: str = NOTEBOOKLM_URL) -> dict[str, Any]:
+    def open_auth(self, *, url: str = NOTEBOOKLM_URL, wait_seconds: int | None = None) -> dict[str, Any]:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         executable = self._browser_executable()
         args = [
@@ -157,12 +157,15 @@ class NotebookLMAgent:
             url,
         ]
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if wait_seconds is not None and wait_seconds > 0:
+            time.sleep(wait_seconds)
         return {
             "status": "opened",
             "url": url,
             "profile_dir": str(self.profile_dir.resolve()),
             "browser": str(executable),
             "pid": process.pid,
+            "wait_seconds": wait_seconds or 0,
         }
 
     def create_notebook(self, *, session_id: str, send_prompt: bool = True) -> dict[str, Any]:
@@ -204,6 +207,7 @@ class NotebookLMAgent:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(NOTEBOOKLM_URL, wait_until="domcontentloaded", timeout=60_000)
                 page.wait_for_timeout(3_000)
+                self._wait_for_manual_auth_if_needed(page)
                 self._click_button_by_text(
                     page,
                     exact="add\nСоздать",
@@ -358,6 +362,7 @@ class NotebookLMAgent:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(notebook_url, wait_until="domcontentloaded", timeout=60_000)
                 page.wait_for_timeout(5_000)
+                self._wait_for_manual_auth_if_needed(page)
                 self._send_prompt(page, prompt)
                 sent_path = prompt_path.with_suffix(prompt_path.suffix + ".sent")
                 sent_path.write_text(datetime.now(UTC).isoformat() + "\n", encoding="utf-8")
@@ -622,6 +627,26 @@ class NotebookLMAgent:
         textarea.fill(prompt)
         textarea.press("Enter")
         page.wait_for_timeout(20_000)
+
+    @staticmethod
+    def _wait_for_manual_auth_if_needed(page: Any) -> None:
+        wait_seconds = int(os.environ.get("NOTEBOOKLM_MANUAL_AUTH_WAIT_SECONDS", "0") or "0")
+        if wait_seconds <= 0:
+            return
+        try:
+            body = page.locator("body").inner_text(timeout=10_000).casefold()
+        except Exception:
+            body = ""
+        markers = [
+            "verify it's you",
+            "confirm your identity",
+            "подтвердите свою личность",
+            "підтвердьте свою особу",
+            "войдите",
+            "sign in",
+        ]
+        if any(marker in body for marker in markers):
+            page.wait_for_timeout(wait_seconds * 1000)
 
     @staticmethod
     def _click_button_by_text(

@@ -111,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     notebooklm.add_argument("--session-id")
     notebooklm.add_argument("--exports-root", default="exports/task_extractor")
     notebooklm.add_argument("--profile-dir", default="data/notebooklm-browser-profile")
+    notebooklm.add_argument("--auth-wait-seconds", type=int, default=int(os.environ.get("NOTEBOOKLM_MANUAL_AUTH_WAIT_SECONDS", "0") or "0"))
     notebooklm.add_argument("--no-prompt", action="store_true")
     notebooklm.add_argument("--once", action="store_true")
     notebooklm.add_argument("--interval", type=int, default=60)
@@ -292,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "notebooklm-agent":
         agent = NotebookLMAgent(exports_root=Path(args.exports_root), profile_dir=Path(args.profile_dir))
         if args.action == "open-auth":
-            print(json.dumps(agent.open_auth(), ensure_ascii=False, indent=2))
+            print(json.dumps(agent.open_auth(wait_seconds=args.auth_wait_seconds), ensure_ascii=False, indent=2))
             return 0
         if args.action == "watch":
             remote = None
