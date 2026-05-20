@@ -13,7 +13,7 @@ from typing import Any, Protocol
 import requests
 
 
-DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-small"
+DEFAULT_EMBEDDINGS_MODEL = "text-embedding-3-large"
 DEFAULT_LLM_MODEL = "gpt-4.1-mini"
 DEFAULT_MIN_ANSWER_SCORE = 0.18
 ANSWER_MODES = {

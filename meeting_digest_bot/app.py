@@ -66,7 +66,7 @@ def _knowledge_repo() -> KnowledgeRepository:
 
 def _knowledge_vector_store() -> KnowledgeVectorStore:
     env = dict(os.environ)
-    embeddings_model = env.get("KNOWLEDGE_EMBEDDINGS_MODEL") or env.get("OPENAI_EMBEDDINGS_MODEL") or "text-embedding-3-small"
+    embeddings_model = env.get("KNOWLEDGE_EMBEDDINGS_MODEL") or env.get("OPENAI_EMBEDDINGS_MODEL") or "text-embedding-3-large"
     db_path = env.get("KNOWLEDGE_VECTOR_DB_PATH")
     return KnowledgeVectorStore(
         _knowledge_repo().root,
