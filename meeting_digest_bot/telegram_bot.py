@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from typing import Iterable
 import zipfile
 from urllib.parse import parse_qs, quote_plus, urlparse
 from zoneinfo import ZoneInfo
@@ -628,11 +629,12 @@ class TelegramBotFacade:
         result = self._answer_from_knowledge(repo, query, answer_mode="general")
         normalized = self._normalize_revision_query(repo, query=query, answer_result=result, extra_trusted_sources=trusted_sources or [])
         cleaned_query = str(normalized.get("cleaned_query") or query).strip() or query
-        replacements = [
+        replacements = self._filter_revision_replacements(
             (str(item.get("old") or ""), str(item.get("new") or ""))
             for item in normalized.get("replacements") or []
             if isinstance(item, dict) and str(item.get("old") or "").strip() and str(item.get("new") or "").strip()
-        ]
+        )
+        instruction_summary = str(normalized.get("instruction_summary") or "").strip()
         source_ids: list[str] = []
         for item in result.get("sources") or []:
             object_id = str(item.get("object_id") or "")
@@ -651,12 +653,15 @@ class TelegramBotFacade:
                 correction=cleaned_query,
                 replacements=[{"old": old, "new": new} for old, new in replacements],
                 trusted_sources=normalized.get("trusted_sources") or [],
+                instruction_summary=instruction_summary,
             ).model_dump()
             for object_id in object_ids
         ]
         lines = [f"Создал правки на проверку: {len(proposals)}."]
+        if instruction_summary:
+            lines.extend(["", "Как я понял инструкцию:", instruction_summary])
         if normalized.get("used_ai") and cleaned_query != query:
-            lines.extend(["", "Как я понял правку после очистки транскрипции:", cleaned_query])
+            lines.extend(["", "Очищенная формулировка правки:", cleaned_query])
         if replacements:
             lines.extend(["", "Что реально изменится в ответах и инструкциях:"])
             lines.extend(f"- `{old}` будет трактоваться и записываться как `{new}`." for old, new in replacements)
@@ -678,6 +683,7 @@ class TelegramBotFacade:
                 "query": cleaned_query,
                 "raw_query": query,
                 "normalization": normalized,
+                "instruction_summary": instruction_summary,
                 "proposal": proposals[0] if len(proposals) == 1 else {},
                 "proposals": proposals,
                 "replacements": [{"old": old, "new": new} for old, new in replacements],
@@ -690,6 +696,7 @@ class TelegramBotFacade:
         fallback = {
             "cleaned_query": query,
             "replacements": fallback_replacements,
+            "instruction_summary": self._fallback_instruction_summary(query, trusted_sources),
             "notes": [],
             "confidence": "low" if not fallback_replacements else "medium",
             "used_ai": False,
@@ -734,7 +741,11 @@ class TelegramBotFacade:
                     "If a trusted source is unavailable, mention that in notes and do not invent its content. "
                     "Normalize obvious transcription mistakes only when the source context or the user wording supports it. "
                     "Extract explicit terminology replacements such as 'old term should be new term'. "
-                    "Return strict JSON with keys: cleaned_query, replacements, notes, confidence. "
+                    "Do not create replacements from Telegram command words such as правка, исправь, обнови знание, знание, инструкция, replace, correction. "
+                    "Replacements are only for domain terms, abbreviations, product names, or transcription artifacts. "
+                    "If the user provides a trusted full instruction, summarize what knowledge rule should change and leave replacements empty unless explicit terminology replacements are present. "
+                    "Return strict JSON with keys: cleaned_query, instruction_summary, replacements, notes, confidence. "
+                    "instruction_summary must be 2-5 short Russian sentences explaining how you understood the requested knowledge update. "
                     "replacements must be an array of {old,new,reason}. "
                     "If unsure, keep the original wording and put a note."
                 ),
@@ -779,9 +790,33 @@ class TelegramBotFacade:
             if key not in seen:
                 replacements.append(item)
                 seen.add(key)
+        filtered_pairs = self._filter_revision_replacements(
+            (str(item.get("old") or ""), str(item.get("new") or "")) for item in replacements if isinstance(item, dict)
+        )
+        replacements = [
+            {
+                "old": old,
+                "new": new,
+                "reason": next(
+                    (
+                        str(item.get("reason") or "")
+                        for item in replacements
+                        if isinstance(item, dict)
+                        and str(item.get("old") or "").casefold() == old.casefold()
+                        and str(item.get("new") or "").casefold() == new.casefold()
+                    ),
+                    "",
+                ),
+            }
+            for old, new in filtered_pairs
+        ]
         notes = parsed.get("notes") if isinstance(parsed.get("notes"), list) else []
+        instruction_summary = str(parsed.get("instruction_summary") or "").strip()
+        if not instruction_summary:
+            instruction_summary = self._fallback_instruction_summary(cleaned, trusted_sources)
         return {
             "cleaned_query": cleaned,
+            "instruction_summary": instruction_summary,
             "replacements": replacements,
             "notes": [str(item) for item in notes if str(item).strip()][:5],
             "confidence": str(parsed.get("confidence") or "medium"),
@@ -1013,6 +1048,76 @@ class TelegramBotFacade:
         return None
 
     @staticmethod
+    def _fallback_instruction_summary(query: str, trusted_sources: list[dict] | None = None) -> str:
+        fetched_sources = [item for item in (trusted_sources or []) if isinstance(item, dict) and item.get("status") == "fetched"]
+        if fetched_sources:
+            source = fetched_sources[0]
+            title = str(source.get("title") or source.get("url") or "проверенного источника").strip()
+            text = re.sub(r"\s+", " ", str(source.get("text") or "")).strip()
+            if text:
+                return f"Нужно обновить знание по проверенному источнику: {title}. Ключевое содержание источника будет учтено как правило для связанных объектов базы знаний."
+        cleaned = re.sub(r"\s+", " ", query).strip()
+        return cleaned[:700] if cleaned else "Не удалось надежно извлечь смысл правки; лучше переформулировать запрос."
+
+    @staticmethod
+    def _filter_revision_replacements(items: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+        command_terms = {
+            "kb",
+            "ask",
+            "правка",
+            "правки",
+            "исправь",
+            "исправить",
+            "исправление",
+            "обнови",
+            "обновить",
+            "обнови знание",
+            "знание",
+            "знания",
+            "база",
+            "база знаний",
+            "инструкция",
+            "инструкцию",
+            "проверенная инструкция",
+            "по проверенной инструкции",
+            "корректировка",
+            "замени",
+            "заменить",
+            "учти",
+            "добавь",
+            "создай",
+            "прими",
+            "replace",
+            "correction",
+            "update knowledge",
+        }
+        seen: set[tuple[str, str]] = set()
+        filtered: list[tuple[str, str]] = []
+
+        def normalize(value: str) -> str:
+            return re.sub(r"\s+", " ", value.strip(" `\"'«».,;:()[]{}")).casefold()
+
+        for old, new in items:
+            old = str(old or "").strip(" `\"'«».,;:()[]{}")
+            new = str(new or "").strip(" `\"'«».,;:()[]{}")
+            old_norm = normalize(old)
+            new_norm = normalize(new)
+            if not old_norm or not new_norm or old_norm == new_norm:
+                continue
+            if old_norm in command_terms or new_norm in command_terms:
+                continue
+            if len(old_norm) < 2 or len(new_norm) < 2:
+                continue
+            if len(old_norm.split()) > 8 or len(new_norm.split()) > 8:
+                continue
+            key = (old_norm, new_norm)
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append((old, new))
+        return filtered
+
+    @staticmethod
     def _extract_term_replacements(query: str) -> list[tuple[str, str]]:
         replacements: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
@@ -1079,11 +1184,15 @@ class TelegramBotFacade:
         data = repo._read_json(metadata_path)
         object_id = str(data.get("object_id") or "")
         correction = str(data.get("correction") or "")
+        instruction_summary = str(data.get("instruction_summary") or "").strip()
         replacements = [item for item in data.get("replacements") or [] if isinstance(item, dict)]
         lines = [
             "Эффект правки:",
             f"- Объект: {self._knowledge_object_label(repo, object_id)}",
             f"- Статус: {data.get('status') or 'draft'}",
+            "",
+            "Как я понял инструкцию:",
+            instruction_summary or self._fallback_instruction_summary(correction, data.get("trusted_sources") or []),
             "",
             "Как изменятся ответы:",
         ]
@@ -1117,6 +1226,7 @@ class TelegramBotFacade:
         seen_replacements: set[tuple[str, str]] = set()
         object_ids: list[str] = []
         correction = ""
+        instruction_summary = ""
         trusted_sources: list[dict] = []
         seen_source_urls: set[str] = set()
         for item in loaded:
@@ -1124,6 +1234,7 @@ class TelegramBotFacade:
             if object_id:
                 object_ids.append(object_id)
             correction = correction or str(item.get("correction") or "")
+            instruction_summary = instruction_summary or str(item.get("instruction_summary") or "").strip()
             for source in item.get("trusted_sources") or []:
                 if not isinstance(source, dict):
                     continue
@@ -1146,6 +1257,13 @@ class TelegramBotFacade:
             for source in trusted_sources[:5]:
                 label = source.get("title") or source.get("url") or source.get("type")
                 lines.append(f"- {label} ({source.get('type')}, {source.get('status')})")
+        lines.extend(
+            [
+                "",
+                "Как я понял инструкцию:",
+                instruction_summary or self._fallback_instruction_summary(correction, trusted_sources),
+            ]
+        )
         if replacements:
             lines.extend(["", "Что изменится в ответах и инструкциях:"])
             lines.extend(f"- `{item['old']}` будет заменено на `{item['new']}`." for item in replacements)

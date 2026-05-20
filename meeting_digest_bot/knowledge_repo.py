@@ -322,6 +322,7 @@ class KnowledgeRepository:
         correction: str,
         replacements: list[dict[str, str]] | None = None,
         trusted_sources: list[dict[str, Any]] | None = None,
+        instruction_summary: str | None = None,
         output_dir: Path | None = None,
     ) -> KnowledgeRevisionProposal:
         source_path = self._canonical_object_path(object_id)
@@ -347,6 +348,7 @@ class KnowledgeRepository:
                     "applied_at": None,
                     "replacements": replacements or [],
                     "trusted_sources": trusted_sources or [],
+                    "instruction_summary": instruction_summary or "",
                 },
                 ensure_ascii=False,
                 indent=2,

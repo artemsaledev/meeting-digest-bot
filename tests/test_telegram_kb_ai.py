@@ -52,8 +52,21 @@ class FakeCorrectionClient:
     def complete_messages(self, messages: list[dict[str, str]], *, model: str | None = None, temperature: float = 0.1) -> str:
         return (
             '{"cleaned_query":"исправь знание: бонусы зависят от процента распределения по сумме заказа и товарному составу",'
+            '"instruction_summary":"Бонусы нужно считать по проценту распределения, сумме заказа и товарному составу.",'
             '"replacements":[{"old":"Исправдания","new":"исправление","reason":"speech transcript typo"}],'
             '"notes":["очищено из голосовой транскрипции"],"confidence":"medium"}'
+        )
+
+
+class FakeCommandReplacementClient:
+    embeddings_model = "text-embedding-3-large"
+
+    def complete_messages(self, messages: list[dict[str, str]], *, model: str | None = None, temperature: float = 0.1) -> str:
+        return (
+            '{"cleaned_query":"Обнови знание по проверенной инструкции Google Doc",'
+            '"instruction_summary":"Нужно обновить правила работы функциональности по содержанию проверенной инструкции из Google Doc. Источник должен быть использован как основание для связанных task cases, features, systems и instructions.",'
+            '"replacements":[{"old":"правка","new":"обнови знание","reason":"service words, should be ignored"}],'
+            '"notes":[],"confidence":"medium"}'
         )
 
 
@@ -453,7 +466,7 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
                 )
 
             self.assertTrue(result.ok)
-            self.assertIn("Как я понял правку", result.text)
+            self.assertIn("Как я понял инструкцию", result.text)
             self.assertIn("исправь знание: бонусы зависят", result.payload["query"])
             proposal = result.payload["proposal"]
             self.assertIn("исправь знание: бонусы зависят", proposal["correction"])
@@ -508,6 +521,54 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
         self.assertEqual(sources[0]["status"], "fetched")
         self.assertIn("Проверенная инструкция", sources[0]["text"])
         self.assertIn("/document/d/doc123/export?format=txt", mocked_get.call_args.args[0])
+
+    def test_revision_preview_shows_understanding_and_filters_command_replacements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"KNOWLEDGE_REPO_PATH": tmp, "KNOWLEDGE_RAG_API_KEY": "", "OPENAI_API_KEY": "", "LLM_API_KEY": ""},
+            clear=False,
+        ):
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            repo.build_index()
+            repo.build_chunk_index()
+
+            bot = FakeTelegramBot()
+            with patch.object(
+                bot,
+                "_answer_from_knowledge",
+                return_value={"answer": "ok", "sources": [{"object_id": knowledge_object().object_id, "title": "Bitrix checklist", "snippets": ["bonus typo"]}]},
+            ), patch(
+                "meeting_digest_bot.telegram_bot.client_from_env",
+                return_value=FakeCommandReplacementClient(),
+            ), patch(
+                "meeting_digest_bot.telegram_bot.requests.get",
+                return_value=FakeHTTPResponse("Проверенная инструкция: обновить правило по функциональности."),
+            ):
+                result = bot.process_update(
+                    {
+                        "message": {
+                            "message_id": 234,
+                            "text": "@LLMeets_bot правка: Обнови знание по проверенной инструкции https://docs.google.com/document/d/doc123/edit",
+                            "chat": {"id": 123},
+                            "from": {"id": 7},
+                        }
+                    }
+                )
+
+            self.assertTrue(result.ok)
+            self.assertIn("Как я понял инструкцию", result.text)
+            self.assertIn("проверенной инструкции из Google Doc", result.text)
+            self.assertNotIn("`правка` будет заменено", result.text)
+            self.assertEqual(result.payload["replacements"], [])
+            metadata = KnowledgeRepository(Path(tmp))._read_json(Path(result.payload["proposal"]["metadata_path"]))
+            self.assertIn("проверенной инструкции из Google Doc", metadata["instruction_summary"])
+
+    def test_revision_replacement_filter_ignores_command_words(self) -> None:
+        bot = FakeTelegramBot()
+        replacements = bot._filter_revision_replacements([("правка", "обнови знание"), ("ВМС", "WMS"), ("ИГРА", "CRM")])
+
+        self.assertEqual(replacements, [("ВМС", "WMS"), ("ИГРА", "CRM")])
 
     def test_mention_health_routes_to_knowledge_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"KNOWLEDGE_REPO_PATH": tmp}, clear=False):
