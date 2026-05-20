@@ -150,14 +150,14 @@ class TelegramBotFacade:
                 self.send_message(chat_id, response.text)
             return response
 
-        kb_response = self._process_kb_command(text)
+        kb_response = self._process_kb_command(text) if self._chat_allowed("KNOWLEDGE_ALLOWED_CHAT_IDS", chat_id) else None
         if kb_response:
             if chat_id:
                 self._remember_knowledge_context(chat_id, (message.get("from") or {}).get("id"), kb_response)
                 self.send_message(chat_id, kb_response.text, reply_markup=self._keyboard_for_response(kb_response, chat_id=chat_id, user_id=(message.get("from") or {}).get("id")))
             return kb_response
 
-        kb_ai_response = self._process_knowledge_ai_request(text, message=message)
+        kb_ai_response = self._process_knowledge_ai_request(text, message=message) if self._chat_allowed("KNOWLEDGE_ALLOWED_CHAT_IDS", chat_id) else None
         if kb_ai_response:
             if chat_id:
                 user_id = (message.get("from") or {}).get("id")
@@ -185,6 +185,12 @@ class TelegramBotFacade:
             if chat_id:
                 self.send_message(chat_id, report_response.text)
             return report_response
+
+        if not self._chat_allowed("MEETING_ALLOWED_CHAT_IDS", chat_id):
+            response = TelegramResponse(ok=False, text="Команда не включена для этого чата.")
+            if chat_id:
+                self.send_message(chat_id, response.text)
+            return response
 
         command = self._parse_command(text, message=message)
         action = SyncAction.preview if command.action == SyncAction.auto else command.action
@@ -343,6 +349,11 @@ class TelegramBotFacade:
         user_id = (callback.get("from") or {}).get("id")
         session_key = self._knowledge_session_key(chat_id, user_id)
         action = data.split(":", 1)[1]
+        if not self._chat_allowed("KNOWLEDGE_ALLOWED_CHAT_IDS", chat_id):
+            response = TelegramResponse(ok=False, text="База знаний не включена для этого чата.", payload={"intent": action})
+            if chat_id:
+                self.send_message(chat_id, response.text)
+            return response
         if action == "menu":
             response = TelegramResponse(ok=True, text=self._knowledge_menu_text(), payload={"intent": "menu"})
         elif action == "ask":
@@ -765,6 +776,16 @@ class TelegramBotFacade:
     @staticmethod
     def _knowledge_session_key(chat_id: int | str | None, user_id: int | str | None) -> str:
         return f"{chat_id or '-'}:{user_id or '-'}"
+
+    @staticmethod
+    def _chat_allowed(env_name: str, chat_id: int | str | None) -> bool:
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            return True
+        if chat_id is None:
+            return False
+        allowed = {item.strip() for item in re.split(r"[,;\s]+", raw) if item.strip()}
+        return str(chat_id).strip() in allowed
 
     def _remember_knowledge_context(self, chat_id: int | str | None, user_id: int | str | None, response: TelegramResponse) -> None:
         if not chat_id:
@@ -1345,10 +1366,10 @@ class TelegramBotFacade:
         mapping = [
             (TaskExtractorAction.collect, [" collect ", " /collect ", " собрать ", " /собрать "]),
             (TaskExtractorAction.add, [" add ", " /add ", " добавить ", " /добавить "]),
-            (TaskExtractorAction.preview, [" preview ", " /preview "]),
+            (TaskExtractorAction.preview, [" preview ", " /preview ", " предпросмотр ", " /предпросмотр ", " показать ", " /показать ", " проверить ", " /проверить "]),
             (TaskExtractorAction.export, [" export ", " /export ", " выгрузка ", " /выгрузка "]),
-            (TaskExtractorAction.create, [" create ", " /create ", " создать ", " /создать "]),
-            (TaskExtractorAction.update, [" update ", " /update ", " обновить ", " /обновить "]),
+            (TaskExtractorAction.create, [" create ", " /create ", " new ", " /new ", " создать ", " /создать ", " новая ", " /новая ", " новую ", " /новую "]),
+            (TaskExtractorAction.update, [" update ", " /update ", " replace ", " /replace ", " обновить ", " /обновить ", " заменить ", " /заменить "]),
             (TaskExtractorAction.comment, [" comment ", " /comment ", " коммент ", " /коммент ", " комментарий ", " /комментарий ", " комментарии ", " /комментарии "]),
             (TaskExtractorAction.checklist, [" checklist ", " /checklist ", " чеклист ", " /чеклист ", " чек-лист ", " /чек-лист "]),
             (TaskExtractorAction.clear, [" clear ", " /clear ", " очистить ", " /очистить "]),
