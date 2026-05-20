@@ -544,8 +544,36 @@ class TelegramBotFacade:
                 db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
                 embeddings_model=client.embeddings_model,
             )
-            return store.answer(query, embedding_client=client, chat_client=client, limit=5, min_score=0.18, answer_mode=answer_mode)
+            retrieval_query = self._knowledge_retrieval_query(query)
+            return store.answer(
+                query,
+                embedding_client=client,
+                chat_client=client,
+                retrieval_query=retrieval_query,
+                limit=int(os.environ.get("KNOWLEDGE_RAG_CONTEXT_LIMIT", "10")),
+                threshold=float(os.environ.get("KNOWLEDGE_RAG_SEARCH_THRESHOLD", "-1.0")),
+                min_score=float(os.environ.get("KNOWLEDGE_RAG_MIN_SCORE", "0.12")),
+                answer_mode=answer_mode,
+            )
         return repo.ask(query, limit=5)
+
+    @staticmethod
+    def _knowledge_retrieval_query(query: str) -> str:
+        lowered = query.casefold()
+        hints: list[str] = []
+        if any(marker in lowered for marker in ["реквиз", "реквіз", "единые", "єдині"]):
+            hints.append(
+                "единый реквизит единые реквизиты реквизиты ФОП реквізити ФОП "
+                "объединение подзаказов групповое замовлення консолидированное замовлення "
+                "общий платеж Payments Pro"
+            )
+        if any(marker in lowered for marker in ["заказ", "замов", "подзаказ"]):
+            hints.append("заказ заказы замовлення подзаказ подзаказы групповой заказ консолидированный заказ")
+        if any(marker in lowered for marker in ["платеж", "платіж", "payment"]):
+            hints.append("платеж оплата payment Payments Pro AssetPayments общий платеж")
+        if not hints:
+            return query
+        return query + "\n\nПоисковые синонимы и связанные термины:\n" + "\n".join(f"- {hint}" for hint in hints)
 
     def _create_knowledge_revision_from_query(self, repo: KnowledgeRepository, query: str) -> TelegramResponse:
         result = self._answer_from_knowledge(repo, query, answer_mode="general")

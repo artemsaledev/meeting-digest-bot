@@ -61,12 +61,14 @@ class KnowledgeRagTests(unittest.TestCase):
                 "How does checklist sync work?",
                 embedding_client=client,
                 chat_client=client,
+                retrieval_query="Bitrix checklist duplicate",
                 answer_mode="technical_spec",
             )
             self.assertEqual(answer["mode"], "technical_spec")
             self.assertTrue(answer["sources"])
             self.assertIn("task_case__bitrix_123", answer["answer"])
             self.assertIn("technical_spec answer", answer["answer"])
+            self.assertEqual(answer["retrieval_query"], "Bitrix checklist duplicate")
             self.assertGreater(store.usage_stats()["events"], 0)
 
             refused = store.answer(

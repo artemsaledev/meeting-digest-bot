@@ -219,6 +219,7 @@ class KnowledgeVectorStore:
         *,
         embedding_client: EmbeddingClient,
         chat_client: ChatClient,
+        retrieval_query: str | None = None,
         limit: int = 5,
         model: str | None = None,
         system: str | None = None,
@@ -228,7 +229,7 @@ class KnowledgeVectorStore:
         answer_mode: str = "general",
     ) -> dict[str, Any]:
         contexts = self.search(
-            query,
+            retrieval_query or query,
             client=embedding_client,
             limit=limit,
             system=system,
@@ -272,6 +273,7 @@ class KnowledgeVectorStore:
             "mode": answer_mode,
             "confidence": "medium" if top_score >= 0.2 else "low",
             "top_score": top_score,
+            "retrieval_query": retrieval_query or query,
         }
 
     def stats(self) -> dict[str, Any]:

@@ -92,6 +92,15 @@ class NotebookLMAgentTests(unittest.TestCase):
             self.assertTrue(prompt_path.exists())
             self.assertIn("Проверь Payments Pro", prompt_path.read_text(encoding="utf-8"))
 
+            manifest["notebooklm_project_url"] = "https://notebooklm.google.com/notebook/abc"
+            manifest["status"] = "notebook_created"
+            package.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            package_again = agent.prepare_knowledge_package(knowledge_dir=knowledge, session_id="company-knowledge")
+            manifest_again = json.loads(package_again.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest_again["notebooklm_project_url"], "https://notebooklm.google.com/notebook/abc")
+            self.assertEqual(manifest_again["status"], "notebook_created")
+            self.assertTrue(prompt_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

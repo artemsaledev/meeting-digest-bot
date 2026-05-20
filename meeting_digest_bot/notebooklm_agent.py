@@ -86,8 +86,15 @@ class NotebookLMAgent:
         source_dir = package_root / "source_bundle"
         prompt_dir = package_root / "prompt_workspace"
         machine_dir = package_root / "machine_bundle"
-        if package_root.exists():
-            shutil.rmtree(package_root)
+        existing_handoff_path = machine_dir / "handoff_manifest.json"
+        existing_handoff = self._load_json(existing_handoff_path) if existing_handoff_path.exists() else {}
+        existing_run_path = machine_dir / "notebooklm_run.json"
+        existing_run = self._load_json(existing_run_path) if existing_run_path.exists() else {}
+        existing_url = str(
+            existing_handoff.get("notebooklm_project_url") or existing_run.get("notebooklm_project_url") or ""
+        ).strip()
+        if source_dir.exists():
+            shutil.rmtree(source_dir)
         source_dir.mkdir(parents=True, exist_ok=True)
         prompt_dir.mkdir(parents=True, exist_ok=True)
         machine_dir.mkdir(parents=True, exist_ok=True)
@@ -106,13 +113,14 @@ class NotebookLMAgent:
         prompt_path.write_text(self._knowledge_start_prompt(), encoding="utf-8")
         handoff = {
             "session_id": session_id,
-            "status": "exported",
+            "status": "notebook_created" if existing_url else "exported",
             "notebooklm_project_title": "Company Knowledge Base",
-            "notebooklm_project_url": "",
+            "notebooklm_project_url": existing_url,
             "source": "company_knowledge",
             "knowledge_dir": str(knowledge_root),
             "source_bundle_files": source_files,
             "created_at": datetime.now(UTC).isoformat(),
+            "source_refresh_required": bool(existing_url),
         }
         (machine_dir / "handoff_manifest.json").write_text(json.dumps(handoff, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return self.prepare_package(session_id=session_id)
