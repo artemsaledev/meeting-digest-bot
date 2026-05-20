@@ -250,13 +250,6 @@ class TelegramBotFacade:
     def _process_task_extractor_request(self, text: str, *, message: dict) -> TelegramResponse | None:
         action = self._task_extractor_action(text)
         mentioned = TASK_EXTRACTOR_MENTION_RE.search(text) is not None
-        llmeets_task_context = (
-            BOT_MENTION_RE.search(text) is not None
-            and action is not None
-            and self._is_task_extractor_context(text, message=message)
-        )
-        if llmeets_task_context:
-            mentioned = True
         if not mentioned and not self.task_extractor_mode:
             return None
         if not action and self.task_extractor_mode:
@@ -612,6 +605,8 @@ class TelegramBotFacade:
         lowered = cleaned.casefold()
         if BOT_MENTION_RE.search(text) and not cleaned:
             return True
+        if cls._should_defer_to_meeting_sync(text, message=message):
+            return False
         if BOT_MENTION_RE.search(text) and lowered.startswith(("ask ", "спросить ", "вопрос ")):
             return True
         if message.get("voice") or message.get("audio"):
@@ -653,6 +648,51 @@ class TelegramBotFacade:
             )
             return not bool(operational_command)
         return cleaned.startswith(("?", "kb?"))
+
+    @classmethod
+    def _should_defer_to_meeting_sync(cls, text: str, *, message: dict) -> bool:
+        if not BOT_MENTION_RE.search(text):
+            return False
+        action = cls._task_extractor_action(text)
+        if action not in {
+            TaskExtractorAction.preview,
+            TaskExtractorAction.create,
+            TaskExtractorAction.update,
+            TaskExtractorAction.comment,
+            TaskExtractorAction.checklist,
+        }:
+            return False
+        cleaned = cls._strip_bot_mention(text).strip()
+        first_token = cleaned.casefold().lstrip("/").split(maxsplit=1)[0] if cleaned.split() else ""
+        reply = message.get("reply_to_message") or {}
+        reply_text = cls._normalize_text(reply.get("text") or reply.get("caption") or "")
+        return bool(
+            extract_post_link(text)
+            or extract_task_id(text)
+            or reply_text
+            or first_token
+            in {
+                "preview",
+                "create",
+                "new",
+                "update",
+                "replace",
+                "comment",
+                "checklist",
+                "предпросмотр",
+                "показать",
+                "проверить",
+                "создать",
+                "новая",
+                "новую",
+                "обновить",
+                "заменить",
+                "коммент",
+                "комментарий",
+                "чеклист",
+                "чек-лист",
+            }
+        )
 
     @classmethod
     def _is_mention_only(cls, text: str) -> bool:

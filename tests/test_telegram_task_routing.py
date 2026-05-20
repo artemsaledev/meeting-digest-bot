@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from meeting_digest_bot.models import TaskExtractorResult
+from meeting_digest_bot.models import SyncResult, TaskExtractorResult
 from meeting_digest_bot.telegram_bot import TelegramBotFacade
 
 
@@ -18,6 +18,17 @@ class _FakeTaskExtractor:
 class _FakeService:
     def __init__(self) -> None:
         self.task_extractor = _FakeTaskExtractor()
+        self.sync_post_requests = []
+
+    def sync_post(self, request):
+        self.sync_post_requests.append(request)
+        return SyncResult(
+            action=request.action.value,
+            task_id=123,
+            task_url="https://example.test/tasks/123",
+            title="Meeting task",
+            details={"post_url": request.post_url},
+        )
 
 
 class _FakeBot(TelegramBotFacade):
@@ -38,18 +49,18 @@ class _FakeBot(TelegramBotFacade):
 
 
 class TelegramTaskRoutingTests(unittest.TestCase):
-    def test_llmeets_create_reply_to_meeting_routes_to_task_extractor(self) -> None:
+    def test_llmeets_create_reply_to_meeting_routes_to_post_sync(self) -> None:
         bot = _FakeBot()
         result = bot.process_update(
             {
                 "message": {
                     "message_id": 100,
-                    "text": "@LLMeets_bot создать",
-                    "chat": {"id": -100},
+                    "text": "@LLMeets_bot create",
+                    "chat": {"id": -100123},
                     "from": {"id": 7},
                     "reply_to_message": {
                         "message_id": 90,
-                        "text": "Встреча: #daily 20.05 План работ по автоматизации Loom https://loom.com/share/abc",
+                        "text": "Meeting: #task_demo 20.05 Loom https://loom.com/share/abc",
                     },
                 }
             }
@@ -57,9 +68,9 @@ class TelegramTaskRoutingTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.payload["action"], "create")
-        self.assertEqual(bot.fake_service.task_extractor.requests[0].action.value, "create")
-        self.assertEqual(bot.fake_service.task_extractor.requests[0].reply_text.startswith("Встреча:"), True)
-        self.assertEqual(bot.messages[0]["reply_to_message_id"], 100)
+        self.assertEqual(bot.fake_service.task_extractor.requests, [])
+        self.assertEqual(len(bot.fake_service.sync_post_requests), 1)
+        self.assertEqual(bot.fake_service.sync_post_requests[0].post_url, "https://t.me/c/123/90")
 
     def test_llmeets_create_without_meeting_context_does_not_route_to_task_extractor(self) -> None:
         bot = _FakeBot()
@@ -67,15 +78,35 @@ class TelegramTaskRoutingTests(unittest.TestCase):
             {
                 "message": {
                     "message_id": 101,
-                    "text": "@LLMeets_bot создать",
+                    "text": "@LLMeets_bot create",
                     "chat": {"id": -100},
                     "from": {"id": 7},
                 }
             }
         )
 
+        self.assertFalse(result.ok)
         self.assertNotEqual(result.payload.get("intent"), "task_extractor")
         self.assertEqual(bot.fake_service.task_extractor.requests, [])
+        self.assertEqual(bot.fake_service.sync_post_requests, [])
+
+    def test_task_extractor_bot_still_uses_task_extractor(self) -> None:
+        bot = _FakeBot()
+        result = bot.process_update(
+            {
+                "message": {
+                    "message_id": 102,
+                    "text": "@Task_Extractor_Bot create",
+                    "chat": {"id": -100},
+                    "from": {"id": 7},
+                }
+            }
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.payload["action"], "create")
+        self.assertEqual(bot.fake_service.task_extractor.requests[0].action.value, "create")
+        self.assertEqual(bot.fake_service.sync_post_requests, [])
 
 
 if __name__ == "__main__":
