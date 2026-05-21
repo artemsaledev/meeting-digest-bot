@@ -635,6 +635,7 @@ class TelegramBotFacade:
             if isinstance(item, dict) and str(item.get("old") or "").strip() and str(item.get("new") or "").strip()
         )
         instruction_summary = str(normalized.get("instruction_summary") or "").strip()
+        semantic_update = self._normalized_semantic_update(normalized, instruction_summary=instruction_summary)
         source_ids: list[str] = []
         for item in result.get("sources") or []:
             object_id = str(item.get("object_id") or "")
@@ -654,6 +655,7 @@ class TelegramBotFacade:
                 replacements=[{"old": old, "new": new} for old, new in replacements],
                 trusted_sources=normalized.get("trusted_sources") or [],
                 instruction_summary=instruction_summary,
+                semantic_update=semantic_update,
             ).model_dump()
             for object_id in object_ids
         ]
@@ -662,6 +664,16 @@ class TelegramBotFacade:
             lines.extend(["", "Как я понял инструкцию:", instruction_summary])
         if normalized.get("used_ai") and cleaned_query != query:
             lines.extend(["", "Очищенная формулировка правки:", cleaned_query])
+        lines.extend(
+            [
+                "",
+                "Как будет разнесено по базе:",
+                f"- Тип изменения: {semantic_update.get('change_type') or 'adds_details'}",
+                f"- Меняет старый контекст: {'да' if semantic_update.get('changes_existing_context') else 'нет'}",
+                f"- Добавляет новые детали: {'да' if semantic_update.get('adds_new_details') else 'нет'}",
+                f"- Поля: {', '.join(str(item) for item in semantic_update.get('target_fields') or []) or 'requirements, decisions'}",
+            ]
+        )
         if replacements:
             lines.extend(["", "Что реально изменится в ответах и инструкциях:"])
             lines.extend(f"- `{old}` будет трактоваться и записываться как `{new}`." for old, new in replacements)
@@ -684,6 +696,7 @@ class TelegramBotFacade:
                 "raw_query": query,
                 "normalization": normalized,
                 "instruction_summary": instruction_summary,
+                "semantic_update": semantic_update,
                 "proposal": proposals[0] if len(proposals) == 1 else {},
                 "proposals": proposals,
                 "replacements": [{"old": old, "new": new} for old, new in replacements],
@@ -697,6 +710,7 @@ class TelegramBotFacade:
             "cleaned_query": query,
             "replacements": fallback_replacements,
             "instruction_summary": self._fallback_instruction_summary(query, trusted_sources),
+            "semantic_update": {},
             "notes": [],
             "confidence": "low" if not fallback_replacements else "medium",
             "used_ai": False,
@@ -744,8 +758,12 @@ class TelegramBotFacade:
                     "Do not create replacements from Telegram command words such as правка, исправь, обнови знание, знание, инструкция, replace, correction. "
                     "Replacements are only for domain terms, abbreviations, product names, or transcription artifacts. "
                     "If the user provides a trusted full instruction, summarize what knowledge rule should change and leave replacements empty unless explicit terminology replacements are present. "
-                    "Return strict JSON with keys: cleaned_query, instruction_summary, replacements, notes, confidence. "
+                    "Analyze whether the instruction changes existing context or adds new details, and which knowledge fields should receive it. "
+                    "Return strict JSON with keys: cleaned_query, instruction_summary, semantic_update, replacements, notes, confidence. "
                     "instruction_summary must be 2-5 short Russian sentences explaining how you understood the requested knowledge update. "
+                    "semantic_update must be an object: {summary, change_type, changes_existing_context, adds_new_details, conflicts, target_fields}. "
+                    "change_type is one of: adds_details, changes_context, contradicts_context, replaces_terms, mixed. "
+                    "target_fields is a list chosen from requirements, decisions, acceptance_criteria, open_questions, behavior, context. "
                     "replacements must be an array of {old,new,reason}. "
                     "If unsure, keep the original wording and put a note."
                 ),
@@ -814,9 +832,11 @@ class TelegramBotFacade:
         instruction_summary = str(parsed.get("instruction_summary") or "").strip()
         if not instruction_summary:
             instruction_summary = self._fallback_instruction_summary(cleaned, trusted_sources)
+        semantic_update = parsed.get("semantic_update") if isinstance(parsed.get("semantic_update"), dict) else {}
         return {
             "cleaned_query": cleaned,
             "instruction_summary": instruction_summary,
+            "semantic_update": self._normalized_semantic_update({"semantic_update": semantic_update}, instruction_summary=instruction_summary),
             "replacements": replacements,
             "notes": [str(item) for item in notes if str(item).strip()][:5],
             "confidence": str(parsed.get("confidence") or "medium"),
@@ -1060,6 +1080,25 @@ class TelegramBotFacade:
         return cleaned[:700] if cleaned else "Не удалось надежно извлечь смысл правки; лучше переформулировать запрос."
 
     @staticmethod
+    def _normalized_semantic_update(normalized: dict, *, instruction_summary: str) -> dict:
+        raw = normalized.get("semantic_update") if isinstance(normalized.get("semantic_update"), dict) else {}
+        target_fields = [
+            str(item).strip()
+            for item in raw.get("target_fields", ["requirements", "decisions"])
+            if str(item).strip()
+        ]
+        conflicts = [str(item).strip() for item in raw.get("conflicts") or [] if str(item).strip()]
+        change_type = str(raw.get("change_type") or "").strip() or ("changes_context" if conflicts else "adds_details")
+        return {
+            "summary": str(raw.get("summary") or instruction_summary).strip(),
+            "change_type": change_type,
+            "changes_existing_context": bool(raw.get("changes_existing_context") or change_type in {"changes_context", "contradicts_context", "mixed"}),
+            "adds_new_details": bool(raw.get("adds_new_details") if "adds_new_details" in raw else True),
+            "conflicts": conflicts[:5],
+            "target_fields": target_fields[:6] or ["requirements", "decisions"],
+        }
+
+    @staticmethod
     def _filter_revision_replacements(items: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
         command_terms = {
             "kb",
@@ -1185,6 +1224,7 @@ class TelegramBotFacade:
         object_id = str(data.get("object_id") or "")
         correction = str(data.get("correction") or "")
         instruction_summary = str(data.get("instruction_summary") or "").strip()
+        semantic_update = data.get("semantic_update") if isinstance(data.get("semantic_update"), dict) else {}
         replacements = [item for item in data.get("replacements") or [] if isinstance(item, dict)]
         lines = [
             "Эффект правки:",
@@ -1193,6 +1233,12 @@ class TelegramBotFacade:
             "",
             "Как я понял инструкцию:",
             instruction_summary or self._fallback_instruction_summary(correction, data.get("trusted_sources") or []),
+            "",
+            "Как будет разнесено по базе:",
+            f"- Тип изменения: {semantic_update.get('change_type') or 'adds_details'}",
+            f"- Меняет старый контекст: {'да' if semantic_update.get('changes_existing_context') else 'нет'}",
+            f"- Добавляет новые детали: {'да' if semantic_update.get('adds_new_details') else 'нет'}",
+            f"- Поля: {', '.join(str(item) for item in semantic_update.get('target_fields') or []) or 'requirements, decisions'}",
             "",
             "Как изменятся ответы:",
         ]
@@ -1227,6 +1273,7 @@ class TelegramBotFacade:
         object_ids: list[str] = []
         correction = ""
         instruction_summary = ""
+        semantic_update: dict = {}
         trusted_sources: list[dict] = []
         seen_source_urls: set[str] = set()
         for item in loaded:
@@ -1235,6 +1282,8 @@ class TelegramBotFacade:
                 object_ids.append(object_id)
             correction = correction or str(item.get("correction") or "")
             instruction_summary = instruction_summary or str(item.get("instruction_summary") or "").strip()
+            if not semantic_update and isinstance(item.get("semantic_update"), dict):
+                semantic_update = item["semantic_update"]
             for source in item.get("trusted_sources") or []:
                 if not isinstance(source, dict):
                     continue
@@ -1262,6 +1311,12 @@ class TelegramBotFacade:
                 "",
                 "Как я понял инструкцию:",
                 instruction_summary or self._fallback_instruction_summary(correction, trusted_sources),
+                "",
+                "Как будет разнесено по базе:",
+                f"- Тип изменения: {semantic_update.get('change_type') or 'adds_details'}",
+                f"- Меняет старый контекст: {'да' if semantic_update.get('changes_existing_context') else 'нет'}",
+                f"- Добавляет новые детали: {'да' if semantic_update.get('adds_new_details') else 'нет'}",
+                f"- Поля: {', '.join(str(item) for item in semantic_update.get('target_fields') or []) or 'requirements, decisions'}",
             ]
         )
         if replacements:
@@ -1303,6 +1358,30 @@ class TelegramBotFacade:
                 db_path=Path(os.environ["KNOWLEDGE_VECTOR_DB_PATH"]) if os.environ.get("KNOWLEDGE_VECTOR_DB_PATH") else None,
                 embeddings_model=rag_client.embeddings_model,
             ).build(client=rag_client, force=True)
+        try:
+            repo.export_external_bundle(target="notebooklm")
+            exports_root = os.environ.get("KNOWLEDGE_NOTEBOOKLM_EXPORTS_ROOT")
+            if exports_root:
+                session_id = os.environ.get("KNOWLEDGE_NOTEBOOKLM_SESSION_ID") or "company-knowledge"
+                package = NotebookLMAgent(exports_root=Path(exports_root)).prepare_knowledge_package(
+                    knowledge_dir=repo.root,
+                    session_id=session_id,
+                )
+                NotebookLMAgent(exports_root=Path(exports_root)).queue_prompt(
+                    session_id=session_id,
+                    kind="knowledge_refresh",
+                    prompt=(
+                        "База знаний обновлена: применена новая правка или добавлены новые встречи. "
+                        "Проверь обновленные источники и используй их как актуальный контекст для следующих ответов."
+                    ),
+                    metadata={
+                        "source": "knowledge_rebuild",
+                        "source_refresh_required": True,
+                        "source_count": len(package.source_files),
+                    },
+                )
+        except Exception as exc:
+            print(f"Knowledge NotebookLM refresh queue failed: {exc}")
 
     @classmethod
     def _should_handle_knowledge_ai(cls, text: str, *, message: dict) -> bool:

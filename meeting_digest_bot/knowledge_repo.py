@@ -323,6 +323,7 @@ class KnowledgeRepository:
         replacements: list[dict[str, str]] | None = None,
         trusted_sources: list[dict[str, Any]] | None = None,
         instruction_summary: str | None = None,
+        semantic_update: dict[str, Any] | None = None,
         output_dir: Path | None = None,
     ) -> KnowledgeRevisionProposal:
         source_path = self._canonical_object_path(object_id)
@@ -349,6 +350,7 @@ class KnowledgeRepository:
                     "replacements": replacements or [],
                     "trusted_sources": trusted_sources or [],
                     "instruction_summary": instruction_summary or "",
+                    "semantic_update": semantic_update or {},
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -485,6 +487,8 @@ class KnowledgeRepository:
         replacements = [item for item in data.get("replacements") or [] if isinstance(item, dict)]
         if replacements:
             source = self._apply_text_replacements(source, replacements)
+        semantic_update = data.get("semantic_update") if isinstance(data.get("semantic_update"), dict) else {}
+        source = self._apply_semantic_update(source, semantic_update=semantic_update, proposal=data)
         history = source.get("revision_history")
         if not isinstance(history, list):
             history = []
@@ -494,6 +498,8 @@ class KnowledgeRepository:
                 "proposal_path": data.get("proposal_path"),
                 "replacements": replacements,
                 "trusted_sources": data.get("trusted_sources") or [],
+                "instruction_summary": data.get("instruction_summary") or "",
+                "semantic_update": semantic_update,
                 "applied_at": datetime.now(UTC).isoformat(),
                 "status": "applied",
             }
@@ -1170,6 +1176,57 @@ class KnowledgeRepository:
             return {key: KnowledgeRepository._apply_text_replacements(item, replacements) for key, item in value.items()}
         return value
 
+    @staticmethod
+    def _append_unique_text(items: Any, value: str) -> list[str]:
+        existing = [str(item).strip() for item in items or [] if str(item).strip()] if isinstance(items, list) else []
+        cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
+        if cleaned and cleaned.casefold() not in {item.casefold() for item in existing}:
+            existing.append(cleaned)
+        return existing
+
+    @classmethod
+    def _apply_semantic_update(cls, source: dict[str, Any], *, semantic_update: dict[str, Any], proposal: dict[str, Any]) -> dict[str, Any]:
+        summary = re.sub(r"\s+", " ", str(semantic_update.get("summary") or proposal.get("instruction_summary") or "")).strip()
+        if not summary:
+            return source
+        update = {
+            "summary": summary,
+            "change_type": str(semantic_update.get("change_type") or "adds_details"),
+            "changes_existing_context": bool(semantic_update.get("changes_existing_context") or False),
+            "adds_new_details": bool(semantic_update.get("adds_new_details") if "adds_new_details" in semantic_update else True),
+            "conflicts": [str(item).strip() for item in semantic_update.get("conflicts") or [] if str(item).strip()],
+            "target_fields": [str(item).strip() for item in semantic_update.get("target_fields") or [] if str(item).strip()],
+            "trusted_sources": proposal.get("trusted_sources") or [],
+            "proposal_path": proposal.get("proposal_path"),
+            "applied_at": datetime.now(UTC).isoformat(),
+        }
+        updates = source.get("knowledge_updates")
+        if not isinstance(updates, list):
+            updates = []
+        signature = (summary.casefold(), str(proposal.get("proposal_path") or ""))
+        existing_signatures = {
+            (str(item.get("summary") or "").casefold(), str(item.get("proposal_path") or ""))
+            for item in updates
+            if isinstance(item, dict)
+        }
+        if signature not in existing_signatures:
+            updates.append(update)
+        source["knowledge_updates"] = updates
+
+        fields = {item.casefold() for item in update["target_fields"]}
+        object_type = str(source.get("object_type") or "")
+        requirement_field = "current_requirements" if object_type == "task_case" else "requirements"
+        if not fields or fields & {"requirements", "current_requirements", "functional_requirements", "rules"}:
+            source[requirement_field] = cls._append_unique_text(source.get(requirement_field), f"Knowledge update: {summary}")
+        if update["changes_existing_context"] or update["conflicts"] or fields & {"decisions", "behavior", "context"}:
+            decision = f"Instruction update: {summary}"
+            if update["conflicts"]:
+                decision += " Conflicts/changes: " + "; ".join(update["conflicts"][:3])
+            source["decisions"] = cls._append_unique_text(source.get("decisions"), decision)
+        if fields & {"acceptance_criteria", "acceptance", "qa"}:
+            source["acceptance_criteria"] = cls._append_unique_text(source.get("acceptance_criteria"), f"Validate updated rule: {summary}")
+        return source
+
     def _merge_with_existing(self, item: KnowledgeObject) -> KnowledgeObject:
         path = self.root / "knowledge" / "task_cases" / f"{item.object_id}.json"
         if not path.exists():
@@ -1380,6 +1437,16 @@ class KnowledgeRepository:
             " ".join(data.get("demo_feedback") or []),
             " ".join(data.get("source_task_cases") or []),
         ]
+        for update in data.get("knowledge_updates", []):
+            if isinstance(update, dict):
+                parts.extend(
+                    [
+                        update.get("summary", ""),
+                        update.get("change_type", ""),
+                        " ".join(update.get("conflicts") or []),
+                        " ".join(update.get("target_fields") or []),
+                    ]
+                )
         for event in data.get("source_events", []):
             if isinstance(event, dict):
                 parts.extend(
@@ -1403,6 +1470,11 @@ class KnowledgeRepository:
                     "\n".join(data.get("current_requirements") or []),
                     "\n".join(data.get("requirements") or []),
                     "\n".join(data.get("acceptance_criteria") or []),
+                    "\n".join(
+                        str(update.get("summary") or "")
+                        for update in data.get("knowledge_updates", [])
+                        if isinstance(update, dict)
+                    ),
                 ]
             ).strip()
         )
@@ -1468,16 +1540,42 @@ class KnowledgeRepository:
     @staticmethod
     def _external_source_markdown(data: dict[str, Any]) -> str:
         if data.get("object_type") != "task_case":
-            return KnowledgeRepository._catalog_markdown(KnowledgeCatalogObject.model_validate(data))
+            return (
+                KnowledgeRepository._catalog_markdown(KnowledgeCatalogObject.model_validate(data)).strip()
+                + "\n\n"
+                + KnowledgeRepository._knowledge_updates_markdown(data).strip()
+                + "\n"
+            )
         item = KnowledgeObject.model_validate(data)
         return "\n\n".join(
             [
                 KnowledgeIntake._overview_markdown(item).strip(),
                 KnowledgeIntake._spec_markdown(item).strip(),
+                KnowledgeRepository._knowledge_updates_markdown(data).strip(),
                 KnowledgeIntake._events_markdown(item).strip(),
                 KnowledgeIntake._sources_markdown(item).strip(),
             ]
         ) + "\n"
+
+    @staticmethod
+    def _knowledge_updates_markdown(data: dict[str, Any]) -> str:
+        updates = [item for item in data.get("knowledge_updates") or [] if isinstance(item, dict)]
+        if not updates:
+            return "## Knowledge Updates\n\n- No manual instruction updates yet."
+        lines = ["## Knowledge Updates", ""]
+        for item in updates:
+            summary = str(item.get("summary") or "").strip()
+            if not summary:
+                continue
+            change_type = str(item.get("change_type") or "update")
+            fields = ", ".join(str(value) for value in item.get("target_fields") or []) or "-"
+            lines.append(f"- {summary}")
+            lines.append(f"  - Change type: {change_type}")
+            lines.append(f"  - Target fields: {fields}")
+            conflicts = [str(value) for value in item.get("conflicts") or [] if str(value).strip()]
+            if conflicts:
+                lines.append(f"  - Changes/conflicts: {'; '.join(conflicts[:3])}")
+        return "\n".join(lines).strip() + "\n"
 
     @classmethod
     def _apply_markdown_to_object(cls, data: dict[str, Any], markdown: str) -> None:

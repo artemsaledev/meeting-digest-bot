@@ -875,6 +875,19 @@ def main(argv: list[str] | None = None) -> int:
                             knowledge_dir=repo.root,
                             session_id=os.environ.get("KNOWLEDGE_NOTEBOOKLM_SESSION_ID") or "company-knowledge",
                         )
+                        NotebookLMAgent(exports_root=Path(notebooklm_exports_root)).queue_prompt(
+                            session_id=package.session_id,
+                            kind="knowledge_refresh",
+                            prompt=(
+                                "База знаний обновлена новыми встречами. Проверь обновленные источники и используй их "
+                                "как актуальную версию контекста для следующих ответов."
+                            ),
+                            metadata={
+                                "source": "knowledge_candidate_pipeline",
+                                "source_refresh_required": True,
+                                "source_count": len(package.source_files),
+                            },
+                        )
                         summary["notebooklm_agent_package"] = {
                             "session_id": package.session_id,
                             "root": str(package.root),

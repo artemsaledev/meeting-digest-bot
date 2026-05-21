@@ -65,6 +65,7 @@ class FakeCommandReplacementClient:
         return (
             '{"cleaned_query":"Обнови знание по проверенной инструкции Google Doc",'
             '"instruction_summary":"Нужно обновить правила работы функциональности по содержанию проверенной инструкции из Google Doc. Источник должен быть использован как основание для связанных task cases, features, systems и instructions.",'
+            '"semantic_update":{"summary":"Инструкция из Google Doc добавляет новые правила функциональности.","change_type":"adds_details","changes_existing_context":false,"adds_new_details":true,"conflicts":[],"target_fields":["requirements","decisions"]},'
             '"replacements":[{"old":"правка","new":"обнови знание","reason":"service words, should be ignored"}],'
             '"notes":[],"confidence":"medium"}'
         )
@@ -559,10 +560,13 @@ class TelegramKnowledgeAiTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertIn("Как я понял инструкцию", result.text)
             self.assertIn("проверенной инструкции из Google Doc", result.text)
+            self.assertIn("Как будет разнесено по базе", result.text)
+            self.assertIn("adds_details", result.text)
             self.assertNotIn("`правка` будет заменено", result.text)
             self.assertEqual(result.payload["replacements"], [])
             metadata = KnowledgeRepository(Path(tmp))._read_json(Path(result.payload["proposal"]["metadata_path"]))
             self.assertIn("проверенной инструкции из Google Doc", metadata["instruction_summary"])
+            self.assertEqual(metadata["semantic_update"]["target_fields"], ["requirements", "decisions"])
 
     def test_revision_replacement_filter_ignores_command_words(self) -> None:
         bot = FakeTelegramBot()

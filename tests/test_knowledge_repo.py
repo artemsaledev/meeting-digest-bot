@@ -110,6 +110,36 @@ class KnowledgeRepositoryTests(unittest.TestCase):
             data = json.loads((Path(tmp) / "knowledge" / "task_cases" / "task_case__bitrix_123.json").read_text(encoding="utf-8"))
             self.assertEqual(data["revision_history"][0]["status"], "applied")
 
+    def test_revision_apply_distributes_semantic_instruction_to_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = KnowledgeRepository(Path(tmp))
+            repo.upsert_objects([knowledge_object()])
+            proposal = repo.create_revision_proposal(
+                object_id="task_case__bitrix_123",
+                correction="Обнови знание по проверенной инструкции.",
+                instruction_summary="Бонусы распределяются пропорционально по сумме заказа и товарному составу.",
+                semantic_update={
+                    "summary": "Бонусы распределяются пропорционально по сумме заказа и товарному составу.",
+                    "change_type": "adds_details",
+                    "changes_existing_context": False,
+                    "adds_new_details": True,
+                    "target_fields": ["requirements", "decisions"],
+                },
+            )
+            repo.set_revision_status(metadata_path=Path(proposal.metadata_path), status="approved")
+            repo.apply_revision(metadata_path=Path(proposal.metadata_path))
+
+            object_path = Path(tmp) / "knowledge" / "task_cases" / "task_case__bitrix_123.json"
+            data = json.loads(object_path.read_text(encoding="utf-8"))
+            self.assertIn("knowledge_updates", data)
+            self.assertIn("Бонусы распределяются", data["knowledge_updates"][0]["summary"])
+            self.assertTrue(any("Бонусы распределяются" in item for item in data["current_requirements"]))
+
+            repo.build_chunk_index()
+            chunks = json.loads((Path(tmp) / "indexes" / "knowledge_chunks.json").read_text(encoding="utf-8"))
+            chunk_text = "\n".join(chunk["content"] for chunk in chunks["chunks"])
+            self.assertIn("Бонусы распределяются", chunk_text)
+
     def test_revision_apply_normalizes_terms_in_object_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = KnowledgeRepository(Path(tmp))

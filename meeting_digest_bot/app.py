@@ -23,6 +23,8 @@ app = FastAPI(title="MeetingDigestBot", version="0.1.0")
 class KnowledgeRevisionRequest(BaseModel):
     object_id: str
     correction: str
+    instruction_summary: str = ""
+    semantic_update: dict = {}
 
 
 class KnowledgeRevisionStatusRequest(BaseModel):
@@ -275,6 +277,8 @@ def create_knowledge_revision(payload: KnowledgeRevisionRequest, _: None = Depen
     proposal = _knowledge_repo().create_revision_proposal(
         object_id=payload.object_id,
         correction=payload.correction,
+        instruction_summary=payload.instruction_summary,
+        semantic_update=payload.semantic_update,
     )
     return {"ok": True, "proposal": proposal.model_dump()}
 
@@ -292,7 +296,11 @@ def set_knowledge_revision_status(payload: KnowledgeRevisionStatusRequest, _: No
 
 @app.post("/knowledge/revisions/apply")
 def apply_knowledge_revision(payload: KnowledgeRevisionStatusRequest, _: None = Depends(_require_admin_token)) -> dict:
-    proposal = _knowledge_repo().apply_revision(metadata_path=Path(payload.metadata_path))
+    repo = _knowledge_repo()
+    proposal = repo.apply_revision(metadata_path=Path(payload.metadata_path))
+    repo.build_index()
+    repo.build_chunk_index()
+    repo.export_external_bundle(target="notebooklm")
     return {"ok": True, "proposal": proposal.model_dump()}
 
 

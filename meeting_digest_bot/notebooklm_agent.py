@@ -187,6 +187,8 @@ class NotebookLMAgent:
         package = self.prepare_package(session_id=session_id)
         existing_url = str(package.manifest.get("notebooklm_project_url") or "").strip()
         if existing_url:
+            if package.manifest.get("source_refresh_required"):
+                return self.refresh_notebook_sources(session_id=session_id, send_prompt=send_prompt)
             run_path = self.write_run_log(
                 package,
                 status="already_exists",
@@ -254,6 +256,60 @@ class NotebookLMAgent:
                     "status": "notebook_created",
                     "session_id": package.session_id,
                     "notebooklm_project_title": package.title,
+                    "notebooklm_project_url": notebook_url,
+                    "uploaded_sources": uploaded,
+                    "expected_sources": [path.name for path in package.source_files],
+                    "prompt_sent": prompt_sent,
+                    "run_path": str(run_path),
+                }
+            finally:
+                context.close()
+
+    def refresh_notebook_sources(self, *, session_id: str, send_prompt: bool = True) -> dict[str, Any]:
+        package = self.prepare_package(session_id=session_id)
+        notebook_url = str(package.manifest.get("notebooklm_project_url") or "").strip()
+        if not notebook_url:
+            raise RuntimeError(f"NotebookLM project URL is not set for session_id={session_id}")
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Playwright is required for NotebookLM source refresh. Run: python -m pip install playwright") from exc
+
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        executable = self._browser_executable()
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                str(self.profile_dir.resolve()),
+                executable_path=str(executable),
+                headless=False,
+                viewport={"width": 1440, "height": 1000},
+                args=["--no-first-run", "--disable-default-apps"],
+            )
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(notebook_url, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(5_000)
+                self._wait_for_manual_auth_if_needed(page)
+                self._upload_sources(page, package.source_files)
+                uploaded = self._wait_for_sources(page, package.source_files)
+                prompt_sent = False
+                if send_prompt:
+                    prompt = (
+                        "Источники базы знаний обновлены. Используй новые файлы как актуальную версию, "
+                        "при конфликтах предпочитай более свежие Knowledge Updates и source events."
+                    )
+                    self._send_prompt(page, prompt)
+                    prompt_sent = True
+                self._write_notebook_url(package=package, notebook_url=notebook_url, status="sources_refreshed")
+                run_path = self.write_run_log(
+                    package,
+                    status="sources_refreshed",
+                    notebooklm_project_url=notebook_url,
+                    notes=["Knowledge sources refreshed."] + (["Refresh prompt sent."] if prompt_sent else ["Refresh prompt skipped."]),
+                )
+                return {
+                    "status": "sources_refreshed",
+                    "session_id": package.session_id,
                     "notebooklm_project_url": notebook_url,
                     "uploaded_sources": uploaded,
                     "expected_sources": [path.name for path in package.source_files],
@@ -479,6 +535,8 @@ class NotebookLMAgent:
 
     @staticmethod
     def _is_pending_manifest(manifest: dict[str, Any]) -> bool:
+        if manifest.get("source_refresh_required") and str(manifest.get("notebooklm_project_url") or "").strip():
+            return True
         if str(manifest.get("notebooklm_project_url") or "").strip():
             return False
         status = str(manifest.get("status") or "").strip()
@@ -883,6 +941,7 @@ class NotebookLMAgent:
         manifest = dict(package.manifest)
         manifest["status"] = status
         manifest["notebooklm_project_url"] = notebook_url
+        manifest["source_refresh_required"] = False
         manifest["updated_at"] = datetime.now(UTC).isoformat()
         package.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         package.manifest.update(manifest)
